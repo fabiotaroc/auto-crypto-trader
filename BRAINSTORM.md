@@ -2,7 +2,7 @@
 
 ## The Idea
 
-Adapt the [autoresearch](https://github.com/karpathy/autoresearch) feedback loop for algorithmic trading. Instead of an AI agent iterating on a neural network training script to minimize `val_bpb`, the agent iterates on a **trading strategy script** to maximize **profit factor** (a risk-adjusted profitability metric). The agent connects to [Kraken](https://docs.kraken.com/api/) to trade BTC/USD, runs each strategy variant for a fixed 10-minute window, evaluates the result, keeps or discards, and repeats.
+Adapt the [autoresearch](https://github.com/karpathy/autoresearch) feedback loop for algorithmic trading. Instead of an AI agent iterating on a neural network training script to minimize `val_bpb`, the agent iterates on a **trading strategy script** to maximize **profit factor** (a risk-adjusted profitability metric). The agent connects to [Kraken](https://docs.kraken.com/api/) to trade BTC/EUR, runs each strategy variant for a fixed 10-minute window, evaluates the result, keeps or discards, and repeats.
 
 The first weeks/months run in **shadow mode** — reading real market data from Kraken's public API but only simulating trades internally. No real orders, no real money. Once the agent has iterated enough to find consistently profitable strategies, we flip the switch to live.
 
@@ -41,7 +41,7 @@ autotrader/
 This is the equivalent of `prepare.py`. The agent never touches it. It provides:
 
 1. **Kraken connection** — public WebSocket client (shadow mode) or authenticated REST + WebSocket (live mode)
-2. **Market data feed** — real-time BTC/USD price stream via [Kraken WebSocket v2 API](https://docs.kraken.com/api/)
+2. **Market data feed** — real-time BTC/EUR price stream via [Kraken WebSocket v2 API](https://docs.kraken.com/api/)
 3. **Shadow execution engine** — simulates order fills against the real-time bid/ask spread, tracks a virtual portfolio internally. No real orders placed. This is our "paper trading" since Kraken doesn't offer paper trading for spot crypto.
 4. **Live execution** (Phase 3) — place real orders via REST API when we're ready
 5. **Account state** — virtual balances, positions, P&L (shadow mode) or real account state (live mode)
@@ -51,14 +51,14 @@ This is the equivalent of `prepare.py`. The agent never touches it. It provides:
 Key constants (fixed, not modifiable):
 
 ```python
-TRADING_PAIR = "BTC/USD"
+TRADING_PAIR = "BTC/EUR"
 CYCLE_DURATION = 600          # 10-minute trading window (seconds)
-MAX_POSITION_USD = 100        # hard cap on position size
-MAX_LOSS_PER_CYCLE_USD = 10   # stop-loss per experiment
+MAX_POSITION_EUR = 100        # hard cap on position size
+MAX_LOSS_PER_CYCLE_EUR = 10   # stop-loss per experiment
 MAX_TRADES_PER_CYCLE = 50     # prevent runaway order spam
 TICK_INTERVAL = 1             # strategy called every 1 second
 MODE = "shadow"               # "shadow" or "live" — default shadow
-SHADOW_START_CASH = 500       # virtual starting cash for shadow mode
+SHADOW_START_CASH = 500       # virtual starting cash in EUR for shadow mode
 SHADOW_SLIPPAGE_BPS = 5       # simulated slippage: 5 basis points (0.05%)
 SHADOW_FEE_BPS = 26           # simulated taker fee: 26 bps (0.26%, Kraken default)
 ```
@@ -86,8 +86,8 @@ class Strategy:
             "history": list[float],    # full price history for this cycle (grows up to 600 ticks)
             "elapsed": float,          # seconds since cycle start
             "position": float,         # current position in BTC (signed)
-            "pnl": float,              # unrealized P&L in USD
-            "cash": float,             # available USD balance
+            "pnl": float,              # unrealized P&L in EUR
+            "cash": float,             # available EUR balance
             "fills": list[dict],       # list of fills so far this cycle
         }
 
@@ -153,7 +153,7 @@ profit_factor = gross_profit / gross_loss
 
 Why profit factor over Sharpe ratio:
 - **Stable with few trades.** Sharpe needs many data points to be meaningful. In a 10-minute window we might have 5–30 trades. Profit factor works with any number of closed trades.
-- **Intuitive.** A profit factor of 2.0 means for every $1 lost, $2 was gained. Above 1.0 = profitable, below 1.0 = losing. Industry standard considers 1.75+ as strong for short-term strategies.
+- **Intuitive.** A profit factor of 2.0 means for every €1 lost, €2 was gained. Above 1.0 = profitable, below 1.0 = losing. Industry standard considers 1.75+ as strong for short-term strategies.
 - **Accounts for risk implicitly.** Unlike raw P&L, it penalizes strategies that take big losses even if they occasionally win big.
 
 Edge cases:
@@ -166,9 +166,9 @@ Edge cases:
 
 | metric | description |
 |---|---|
-| `total_pnl` | net profit/loss in USD |
+| `total_pnl` | net profit/loss in EUR |
 | `num_trades` | total trades executed |
-| `max_drawdown` | worst peak-to-trough drop in USD |
+| `max_drawdown` | worst peak-to-trough drop in EUR |
 | `win_rate` | fraction of profitable trades |
 | `avg_trade_pnl` | average P&L per trade |
 | `sharpe_ratio` | risk-adjusted return (logged for reference) |
@@ -179,9 +179,9 @@ Edge cases:
 ```
 ---
 profit_factor:    2.150000
-total_pnl_usd:    3.42
+total_pnl_eur:    3.42
 num_trades:       11
-max_drawdown_usd: 1.05
+max_drawdown_eur: 1.05
 win_rate:         0.636
 sharpe_ratio:     1.23
 time_in_market:   0.52
@@ -192,7 +192,7 @@ mode:             shadow
 ### `results.tsv`
 
 ```
-commit	profit_factor	pnl_usd	num_trades	status	description
+commit	profit_factor	pnl_eur	num_trades	status	description
 a1b2c3d	0.000000	0.00	0	keep	baseline (momentum crossover)
 b2c3d4e	1.850000	1.23	12	keep	add RSI filter
 c3d4e5f	0.620000	-2.10	45	discard	aggressive scalping (overtrading)
@@ -209,7 +209,7 @@ Based on [Kraken API docs](https://docs.kraken.com/api/):
 
 | capability | API | endpoint |
 |---|---|---|
-| Real-time prices | **WebSocket v2** | `subscribe` to `ticker` and `trade` channels for `BTC/USD` |
+| Real-time prices | **WebSocket v2** | `subscribe` to `ticker` and `trade` channels for `BTC/EUR` |
 | Place orders | **Spot REST** | `POST /0/private/AddOrder` |
 | Cancel orders | **Spot REST** | `POST /0/private/CancelOrder` |
 | Check balances | **Spot REST** | `POST /0/private/Balance` |
@@ -220,7 +220,7 @@ Based on [Kraken API docs](https://docs.kraken.com/api/):
 
 ### Shadow mode (Phase 1 & 2): Public API only
 
-Shadow mode only needs the **public** WebSocket — no API key, no authentication. We subscribe to the `ticker` channel for BTC/USD and get real-time bid/ask/price updates. The shadow execution engine simulates fills locally.
+Shadow mode only needs the **public** WebSocket — no API key, no authentication. We subscribe to the `ticker` channel for BTC/EUR and get real-time bid/ask/price updates. The shadow execution engine simulates fills locally.
 
 ### Live mode (Phase 3): Authenticated API
 
@@ -243,7 +243,7 @@ This is the single biggest difference from autoresearch. A buggy `train.py` wast
 
 ### Layer 1: Shadow mode (default — weeks/months)
 
-The system starts in **shadow mode**. It connects to Kraken's **public** WebSocket API (no API key needed) to receive real-time BTC/USD prices. All order execution is simulated internally — `exchange.py` maintains a virtual portfolio and fills orders against the real bid/ask spread with simulated slippage and fees. No real orders. No real money at risk.
+The system starts in **shadow mode**. It connects to Kraken's **public** WebSocket API (no API key needed) to receive real-time BTC/EUR prices. All order execution is simulated internally — `exchange.py` maintains a virtual portfolio and fills orders against the real bid/ask spread with simulated slippage and fees. No real orders. No real money at risk.
 
 Kraken doesn't offer paper trading for spot crypto (only for [futures via demo-futures.kraken.com](https://support.kraken.com/hc/en-us/articles/360026192132-Futures-Demo-Test-accounts)). So we build our own shadow execution engine.
 
@@ -255,8 +255,8 @@ The shadow engine models realistic conditions:
 ### Layer 2: Hard limits in `exchange.py` (not overridable by agent)
 
 ```python
-MAX_POSITION_USD = 100       # never hold more than $100 of BTC
-MAX_LOSS_PER_CYCLE_USD = 10  # auto-liquidate if cycle loss exceeds $10
+MAX_POSITION_EUR = 100       # never hold more than €100 of BTC
+MAX_LOSS_PER_CYCLE_EUR = 10  # auto-liquidate if cycle loss exceeds €10
 MAX_TRADES_PER_CYCLE = 50    # prevent order spam
 MIN_ORDER_SIZE_BTC = 0.0001  # Kraken minimum
 ```
@@ -269,7 +269,7 @@ These limits apply in both shadow and live modes — the shadow engine enforces 
 
 - Use a **restricted API key** with:
   - Trade permission only (no withdrawal)
-  - BTC/USD pair only
+  - BTC/EUR pair only
 - Fund the account with only what you're willing to lose
 
 ### Layer 4: Cycle isolation
@@ -354,15 +354,17 @@ The strategy design space is huge. Some directions:
 
 ## Resolved Decisions
 
-1. **Cycle duration: 10 minutes.** Longer than autoresearch's 5 minutes. BTC/USD needs enough time for the strategy to take positions and see them play out. 10 minutes gives ~6 experiments/hour, ~50 overnight. This is daytrading, so we want volatility — 10 minutes is a sweet spot between enough data and fast iteration.
+1. **Cycle duration: 10 minutes.** Longer than autoresearch's 5 minutes. BTC/EUR needs enough time for the strategy to take positions and see them play out. 10 minutes gives ~6 experiments/hour, ~50 overnight. This is daytrading, so we want volatility — 10 minutes is a sweet spot between enough data and fast iteration.
 
 2. **Primary metric: Profit Factor.** Gross profit / gross loss. Stable with few trades, intuitive (>1.0 = profitable), industry standard for short-term strategies. See Evaluation section for full rationale and edge cases.
 
 3. **Shadow mode first, live later.** Kraken has no spot paper trading ([only futures demo](https://support.kraken.com/hc/en-us/articles/360026192132-Futures-Demo-Test-accounts)). We build our own shadow execution engine that reads real market data from Kraken's public WebSocket and simulates fills internally with realistic slippage and fees. The agent iterates for days/weeks in shadow mode. Live mode is Phase 3.
 
-4. **Fees: simulated now, potentially zero later.** Shadow mode simulates Kraken's default taker fee (0.26%) so the agent learns to account for transaction costs. If a strategy's edge is eaten by fees, that's a legitimate finding — the agent should discover fee-aware strategies. Note: [Kraken+](https://kraken.com/kraken-plus) ($4.99/month) offers zero-fee trading up to $10K/month but **only on the Kraken web/app, NOT through API trades**. API trades on Kraken Pro still use the [maker/taker fee schedule](https://www.kraken.com/en-us/features/fee-schedule/#kraken-pro) (0.16%/0.26% at low volume, decreasing with higher 30-day volume). So when going live, we configure the fee constant to match your actual Kraken fee tier. Higher volume = lower fees = more strategies become viable.
+4. **Fees: simulated now, potentially zero later.** Shadow mode simulates Kraken's default taker fee (0.26%) so the agent learns to account for transaction costs. If a strategy's edge is eaten by fees, that's a legitimate finding — the agent should discover fee-aware strategies. Note: [Kraken+](https://kraken.com/kraken-plus) (~€4.99/month) offers zero-fee trading up to ~€10K/month but **only on the Kraken web/app, NOT through API trades**. API trades on Kraken Pro still use the [maker/taker fee schedule](https://www.kraken.com/en-us/features/fee-schedule/#kraken-pro) (0.16%/0.26% at low volume, decreasing with higher 30-day volume). So when going live, we configure the fee constant to match your actual Kraken fee tier. Higher volume = lower fees = more strategies become viable.
 
 5. **Data context: generous.** The `tick["history"]` buffer holds the full 10-minute price history (600 ticks at 1/sec). The strategy can also request OHLCV candles from Kraken's public REST API for longer historical context. No reason to be stingy — it's just a list of floats in memory.
+
+6. **Quote currency: EUR.** The Kraken account uses EUR, so we trade BTC/EUR. Kraken's BTC/EUR pair has good liquidity (one of the most traded EUR pairs on Kraken) but lower volume than BTC/USD, which may mean slightly wider spreads during low-activity hours. The shadow slippage constant (5 bps) already accounts for this. Fee schedule is identical regardless of quote currency. All P&L, position limits, and cash amounts are denominated in EUR.
 
 ## Remaining Open Questions
 
@@ -377,12 +379,12 @@ The strategy design space is huge. Some directions:
 ## Implementation Plan
 
 ### Phase 1: Shadow mode scaffold
-- [ ] Write `exchange.py` with Kraken public WebSocket price feed + shadow execution engine
-- [ ] Define the `Strategy` interface and write baseline `strategy.py`
-- [ ] Implement evaluation harness (profit factor, P&L, drawdown, etc.)
-- [ ] Adapt `program.md` for trading context
-- [ ] Test manually: run one 10-min cycle and verify metrics
-- [ ] No API key needed — shadow mode uses only Kraken's public endpoints
+- [x] Write `exchange.py` with Kraken public WebSocket price feed + shadow execution engine
+- [x] Define the `Strategy` interface and write baseline `strategy.py`
+- [x] Implement evaluation harness (profit factor, P&L, drawdown, etc.)
+- [x] Adapt `program.md` for trading context
+- [x] Test manually: run one 10-min cycle and verify metrics
+- [x] No API key needed — shadow mode uses only Kraken's public endpoints
 
 ### Phase 2: Agent loop (shadow)
 - [ ] Let the agent loose on `strategy.py` in shadow mode
@@ -391,7 +393,7 @@ The strategy design space is huge. Some directions:
 - [ ] Run for days/weeks until strategies are consistently profitable
 
 ### Phase 3: Live trading (cautious)
-- [ ] Create restricted Kraken API key (trade only, no withdrawal, BTC/USD only)
+- [ ] Create restricted Kraken API key (trade only, no withdrawal, BTC/EUR only)
 - [ ] Fund account with money you're willing to lose
 - [ ] Switch `MODE = "live"` in `exchange.py`
 - [ ] Run shadow in parallel to detect divergence
