@@ -90,7 +90,7 @@ class ShadowEngine:
 
     def __init__(self):
         self.cash: float = SHADOW_START_CASH
-        self.position: float = 0.0       # BTC held (positive=long, negative=short)
+        self.position: float = 0.0       # BTC held (long-only, always >= 0)
         self.avg_entry_price: float = 0.0
         self.fills: list[dict] = []
         self.trade_pnls: list[float] = []
@@ -137,37 +137,24 @@ class ShadowEngine:
         return False
 
     def force_close(self, bid: float, ask: float, timestamp: float):
-        """Close any remaining position (bypasses safety/trade-count limits)."""
-        if abs(self.position) < MIN_ORDER_SIZE_BTC:
+        """Close any remaining long position (bypasses safety/trade-count limits)."""
+        if self.position < MIN_ORDER_SIZE_BTC:
             self.position = 0.0
             return
 
-        if self.position > 0:
-            ep = bid * (1 - SHADOW_SLIPPAGE_BPS / 10_000)
-            proceeds = self.position * ep
-            fee = proceeds * SHADOW_FEE_BPS / 10_000
-            realized = self.position * (ep - self.avg_entry_price) - fee
-            self.trade_pnls.append(realized)
-            self.cash += proceeds - fee
-            self._append_fill("sell", ep, self.position, fee, timestamp)
-        else:
-            qty = abs(self.position)
-            ep = ask * (1 + SHADOW_SLIPPAGE_BPS / 10_000)
-            cost = qty * ep
-            fee = cost * SHADOW_FEE_BPS / 10_000
-            realized = qty * (self.avg_entry_price - ep) - fee
-            self.trade_pnls.append(realized)
-            self.cash -= cost + fee
-            self._append_fill("buy", ep, qty, fee, timestamp)
-
+        ep = bid * (1 - SHADOW_SLIPPAGE_BPS / 10_000)
+        proceeds = self.position * ep
+        fee = proceeds * SHADOW_FEE_BPS / 10_000
+        realized = self.position * (ep - self.avg_entry_price) - fee
+        self.trade_pnls.append(realized)
+        self.cash += proceeds - fee
+        self._append_fill("sell", ep, self.position, fee, timestamp)
         self.position = 0.0
 
     def unrealized_pnl(self, price: float) -> float:
-        if abs(self.position) < 1e-12:
+        if self.position < 1e-12:
             return 0.0
-        if self.position > 0:
-            return self.position * (price - self.avg_entry_price)
-        return abs(self.position) * (self.avg_entry_price - price)
+        return self.position * (price - self.avg_entry_price)
 
     # -- private helpers -----------------------------------------------------
 
@@ -175,7 +162,7 @@ class ShadowEngine:
         ep = ask * (1 + SHADOW_SLIPPAGE_BPS / 10_000)
 
         # Clamp to position limit
-        if abs(self.position + size) * ep > MAX_POSITION_EUR:
+        if (self.position + size) * ep > MAX_POSITION_EUR:
             size = max(0.0, MAX_POSITION_EUR / ep - self.position)
             if size < MIN_ORDER_SIZE_BTC:
                 return None
@@ -191,57 +178,36 @@ class ShadowEngine:
             cost = size * ep
             fee = cost * SHADOW_FEE_BPS / 10_000
 
-        # Realize P&L on portion that closes a short
-        if self.position < 0:
-            close_qty = min(size, abs(self.position))
-            rpnl = close_qty * (self.avg_entry_price - ep) - fee * (close_qty / size)
-            self.trade_pnls.append(rpnl)
-
-        old = self.position
         self.cash -= cost + fee
+
+        # Update average entry price
+        if self.position == 0:
+            self.avg_entry_price = ep
+        else:
+            self.avg_entry_price = (
+                self.position * self.avg_entry_price + size * ep
+            ) / (self.position + size)
+
         self.position += size
-
-        # Update average entry
-        if old < 0 and self.position > 0:
-            self.avg_entry_price = ep
-        elif old == 0:
-            self.avg_entry_price = ep
-        elif old > 0:
-            self.avg_entry_price = (old * self.avg_entry_price + size * ep) / self.position
-
         return self._append_fill("buy", ep, size, fee, ts)
 
     def _sell(self, size: float, bid: float, ts: float) -> dict | None:
+        # Long-only: can only sell what we hold
+        if self.position <= 0:
+            return None
+        size = min(size, self.position)
+        if size < MIN_ORDER_SIZE_BTC:
+            return None
+
         ep = bid * (1 - SHADOW_SLIPPAGE_BPS / 10_000)
-
-        # Clamp to position limit
-        if abs(self.position - size) * ep > MAX_POSITION_EUR:
-            size = max(0.0, self.position + MAX_POSITION_EUR / ep)
-            if size < MIN_ORDER_SIZE_BTC:
-                return None
-
         proceeds = size * ep
         fee = proceeds * SHADOW_FEE_BPS / 10_000
 
-        # Realize P&L on portion that closes a long
-        if self.position > 0:
-            close_qty = min(size, self.position)
-            rpnl = close_qty * (ep - self.avg_entry_price) - fee * (close_qty / size)
-            self.trade_pnls.append(rpnl)
+        rpnl = size * (ep - self.avg_entry_price) - fee
+        self.trade_pnls.append(rpnl)
 
-        old = self.position
         self.cash += proceeds - fee
         self.position -= size
-
-        # Update average entry
-        if old > 0 and self.position < 0:
-            self.avg_entry_price = ep
-        elif old == 0:
-            self.avg_entry_price = ep
-        elif old < 0:
-            self.avg_entry_price = (
-                abs(old) * self.avg_entry_price + size * ep
-            ) / abs(self.position)
 
         return self._append_fill("sell", ep, size, fee, ts)
 
@@ -401,7 +367,7 @@ async def run_cycle(cycle_duration: int = CYCLE_DURATION):
             if now - last_tick >= TICK_INTERVAL and market.has_data:
                 price_history.append(market.price)
                 ticks_total += 1
-                if abs(engine.position) >= MIN_ORDER_SIZE_BTC:
+                if engine.position >= MIN_ORDER_SIZE_BTC:
                     ticks_with_position += 1
 
                 tick = {
@@ -452,7 +418,7 @@ async def run_cycle(cycle_duration: int = CYCLE_DURATION):
                 last_tick = now
 
         # End of cycle: force-close any open position
-        if market.has_data and abs(engine.position) >= MIN_ORDER_SIZE_BTC:
+        if market.has_data and engine.position >= MIN_ORDER_SIZE_BTC:
             print(
                 f"Closing position: {engine.position:+.6f} BTC",
                 file=sys.stderr,
