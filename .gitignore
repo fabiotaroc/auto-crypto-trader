@@ -16,5 +16,8 @@ AGENTS.md
 # Experiment artifacts
 results.tsv
 run.log
+.DS_Store
+probe.log
+smoke.log
 shadow_ledger.json
 STOP
