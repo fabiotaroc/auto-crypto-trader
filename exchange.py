@@ -283,13 +283,13 @@ def compute_metrics(
 def print_metrics(metrics: dict):
     """Print metrics in a grep-friendly format matching the spec."""
     print("---")
+    print(f"sharpe_ratio:     {metrics['sharpe_ratio']:.2f}")
     print(f"profit_factor:    {metrics['profit_factor']:.6f}")
     print(f"total_pnl_eur:    {metrics['total_pnl_eur']:.2f}")
     print(f"num_trades:       {metrics['num_trades']}")
     print(f"max_drawdown_eur: {metrics['max_drawdown_eur']:.2f}")
     print(f"win_rate:         {metrics['win_rate']:.3f}")
     print(f"avg_trade_pnl:    {metrics['avg_trade_pnl']:.4f}")
-    print(f"sharpe_ratio:     {metrics['sharpe_ratio']:.2f}")
     print(f"time_in_market:   {metrics['time_in_market']:.2f}")
     print(f"cycle_seconds:    {metrics['cycle_seconds']:.1f}")
     print(f"mode:             {metrics['mode']}")

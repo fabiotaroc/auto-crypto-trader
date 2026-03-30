@@ -10,32 +10,36 @@ To set up a new experiment, work with the user to:
 2. **Create the branch**: `git checkout -b autotrader/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `BRAINSTORM.md` — full design document and rationale.
-   - `exchange.py` — fixed infrastructure: Kraken WebSocket feed, shadow execution engine, evaluation harness, safety rails. Do not modify.
+   - `backtest.py` — fixed infrastructure: historical data download, replay engine, execution simulation, evaluation harness. Do not modify.
+   - `exchange.py` — fixed infrastructure: Kraken live WebSocket feed, shadow execution engine, safety rails. Do not modify. Used only for optional live validation.
    - `strategy.py` — the file you modify. Trading signals, entry/exit logic, position sizing.
-4. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
-5. **Confirm and go**: Confirm setup looks good.
+4. **Ensure historical data is cached**: Run `uv run backtest.py --update-data` to download/update BTC/EUR 1-minute candle data from Kraken's public API. This caches to `data/btceur_1m.csv` and only needs to be done once (incremental updates on re-run).
+5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+6. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
 
 ## Experimentation
 
-Each experiment connects to Kraken's public WebSocket for real-time BTC/EUR prices and runs a **fixed 10-minute trading window** in shadow mode (simulated execution — no real money). You launch it simply as: `uv run exchange.py`.
+Each experiment **backtests the strategy against months of historical BTC/EUR data** — replaying tens of thousands of 1-minute candles with simulated execution (realistic slippage + fees). A single backtest completes in seconds, giving you fast, deterministic feedback. You launch it simply as: `uv run backtest.py`.
 
 **What you CAN do:**
 - Modify `strategy.py` — this is the only file you edit. Everything is fair game: indicators, signal logic, position sizing, risk management, regime detection, ensemble methods. The only constraint is maintaining the `Strategy` class interface (`__init__`, `on_tick`, `on_fill`) and the `Signal` dataclass.
 
 **What you CANNOT do:**
-- Modify `exchange.py`. It is read-only. It contains the fixed evaluation, shadow engine, safety rails, and constants.
+- Modify `backtest.py` or `exchange.py`. They are read-only. They contain the fixed evaluation, execution simulation, and constants.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
-- Modify the evaluation harness. The `compute_metrics` function in `exchange.py` is the ground truth metric.
+- Modify the evaluation harness. The metrics computed by `backtest.py` are the ground truth.
 
-**The goal is simple: get the highest profit_factor.** A profit factor above 1.0 means the strategy is profitable (gross profit exceeds gross loss). Above 1.75 is considered strong for short-term strategies. The metric accounts for realistic transaction costs (0.26% simulated Kraken taker fee + 0.05% slippage).
+**The goal is simple: get the highest sharpe_ratio.** The annualized Sharpe ratio measures risk-adjusted returns over the historical backtest period. A Sharpe above 1.0 is good, above 2.0 is strong. The metric accounts for realistic transaction costs (0.26% simulated Kraken taker fee + 0.05% slippage).
 
 **Important constraints:**
-- **Minimum 3 trades.** If fewer than 3 round-trip trades complete in 10 minutes, profit_factor is scored as 0.0. The strategy must actually trade.
-- **Non-stationary market.** Unlike a fixed validation set, the market is live and changing. Two identical strategies run 10 minutes apart may score differently due to volatility, trend, or news. Accept the noise and rely on trends over many experiments.
-- **Fees matter.** The shadow engine simulates 0.26% taker fees (Kraken default). A strategy whose edge is eaten by fees will score poorly. Discover fee-aware strategies that trade less frequently but more profitably.
-- **Position limits.** The shadow engine enforces €100 max position, €10 max loss per cycle, and 50 max trades. Strategies that hit these limits get force-closed.
+- **Deterministic feedback.** Unlike live trading, the same strategy always produces the same result against the same historical data. This means you can make incremental changes and reliably tell whether they helped or hurt.
+- **Timescale is minutes, not seconds.** Each tick in the backtest represents a 1-minute OHLC candle. Window sizes, lookback periods, and cooldowns should be calibrated in minutes. For example, a 120-tick lookback covers 2 hours, not 2 minutes.
+- **Train/test split.** The backtest automatically splits data 80/20 — the first 80% is train (what sharpe_ratio reports), the last 20% is test (what sharpe_test reports). You optimize sharpe_ratio (train). If sharpe_test diverges significantly below sharpe_ratio, the strategy is overfitting to historical patterns.
+- **Overfitting is the main risk.** With deterministic backtesting, it's easy to fit noise. Prefer strategies with a clear theoretical basis (momentum, mean-reversion, volatility breakout) over heavily tuned magic numbers. Simpler strategies generalize better.
+- **Fees matter.** The backtest simulates 0.26% taker fees (Kraken default) and 0.05% slippage. A strategy whose edge is eaten by fees will score poorly. Discover fee-aware strategies that trade less frequently but more profitably.
+- **Position limits.** The engine enforces €100 max position. Strategies that exceed this get clamped.
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the experiment as is.
 
@@ -45,48 +49,53 @@ Once the script finishes it prints a summary like this:
 
 ```
 ---
+sharpe_ratio:     1.85
+sharpe_test:      1.42
 profit_factor:    2.150000
-total_pnl_eur:    3.42
-num_trades:       11
-max_drawdown_eur: 1.05
-win_rate:         0.636
-avg_trade_pnl:    0.3109
-sharpe_ratio:     1.23
-time_in_market:   0.52
-cycle_seconds:    600.0
-mode:             shadow
+total_pnl_eur:    47.30
+num_trades:       312
+max_drawdown_eur: 8.20
+win_rate:         0.583
+avg_trade_pnl:    0.1517
+time_in_market:   0.41
+backtest_days:    90.0
+train_days:       72.0
+test_days:        18.0
+mode:             backtest
 ```
 
 You can extract the key metric from the log file:
 
 ```
-grep "^profit_factor:" run.log
+grep "^sharpe_ratio:" run.log
 ```
 
 ## Logging results
 
 When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
 
-The TSV has a header row and 5 columns:
+The TSV has a header row and 7 columns:
 
 ```
-commit	profit_factor	pnl_eur	num_trades	status	description
+commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
 ```
 
 1. git commit hash (short, 7 chars)
-2. profit_factor achieved (e.g. 1.850000) — use 0.000000 for crashes
-3. total P&L in EUR (e.g. 1.23) — use 0.00 for crashes
-4. status: `keep`, `discard`, or `crash`
-5. short text description of what this experiment tried
+2. sharpe_ratio (train) achieved (e.g. 1.85) — use 0.00 for crashes
+3. sharpe_test achieved (e.g. 1.42) — use 0.00 for crashes
+4. total P&L in EUR (e.g. 47.30) — use 0.00 for crashes
+5. num_trades executed
+6. status: `keep`, `discard`, or `crash`
+7. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	profit_factor	pnl_eur	num_trades	status	description
-a1b2c3d	0.000000	0.00	0	keep	baseline (momentum crossover)
-b2c3d4e	1.850000	1.23	12	keep	add RSI filter
-c3d4e5f	0.620000	-2.10	45	discard	aggressive scalping (overtrading)
-d4e5f6g	0.000000	0.00	0	crash	division by zero in volatility calc
+commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
+a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
+b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
+c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit — train/test diverge)
+d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
 ```
 
 ## The experiment loop
@@ -98,23 +107,21 @@ LOOP FOREVER:
 1. Look at the git state: the current branch/commit we're on
 2. Tune `strategy.py` with an experimental idea by directly hacking the code.
 3. git commit
-4. Run the experiment: `uv run exchange.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^profit_factor:\|^total_pnl_eur:" run.log`
+4. Run the experiment: `uv run backtest.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
+5. Read out the results: `grep "^sharpe_ratio:\|^sharpe_test:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If profit_factor improved (higher), you "advance" the branch, keeping the git commit
-9. If profit_factor is equal or worse, you git reset back to where you started
+8. If sharpe_ratio improved (higher), you "advance" the branch, keeping the git commit
+9. If sharpe_ratio is equal or worse, you git reset back to where you started
+10. **Watch for overfitting**: if sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5), the strategy is overfitting. Discard it even if train improved.
 
 The idea is that you are a completely autonomous trading researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
 
-**Key differences from standard ML experimentation:**
-- **Market is non-stationary.** A strategy that works in the morning may fail at night. If a strategy has a strong theoretical basis and shows marginal improvement, you might keep it even with a noisy result. Over dozens of cycles, consistently good strategies will float to the top.
-- **Must close positions.** Each cycle starts and ends flat. The exchange forces this automatically.
-- **Crashes are safe.** In shadow mode, a crash just loses virtual state — no real consequences.
-
-**Timeout**: Each experiment should take ~10 minutes total (+ a few seconds for WebSocket connection). If a run exceeds 15 minutes, kill it and treat it as a failure (discard and revert).
+**Speed**: Each backtest takes seconds (not minutes). You can run dozens of experiments per hour. Use this speed to explore broadly — try many different indicator families, timeframes, and approaches.
 
 **Crashes**: If a run crashes (a bug in strategy.py), use your judgment: fix obvious bugs and re-run. If the idea itself is broken, log "crash", revert, and move on.
+
+**Live validation (optional)**: Periodically, you can validate the current best strategy against live market data using `uv run exchange.py --duration 120 > live.log 2>&1`. This runs a 2-minute live shadow cycle against real-time Kraken prices. It's a sanity check, not the primary metric — live results will differ from backtest due to different market conditions.
 
 **NEVER STOP**: Once the experiment loop has begun (after the initial setup), do NOT pause to ask the human if you should continue. The human might be asleep or away. You are autonomous. If you run out of ideas, think harder — try different indicator families, different timeframes, different position sizing approaches, ensemble methods, regime detection. The loop runs until the human interrupts you, period.
 
@@ -131,3 +138,5 @@ Some directions to explore:
 **Regime detection:** Trend vs. range-bound, volatility regime switching, multi-timeframe analysis.
 
 **Combinations:** Signal ensembles with voting, signal filtering (only trade when multiple indicators agree), adaptive parameters.
+
+**Important note on timescale:** Each tick is a 1-minute candle. Parameters should reflect this — a "fast" moving average might be 10-20 minutes, a "slow" one 60-240 minutes. A cooldown of 5 ticks means 5 minutes. Adjust your intuitions from the old 1-second tick regime.

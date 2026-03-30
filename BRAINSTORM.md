@@ -2,9 +2,9 @@
 
 ## The Idea
 
-Adapt the [autoresearch](https://github.com/karpathy/autoresearch) feedback loop for algorithmic trading. Instead of an AI agent iterating on a neural network training script to minimize `val_bpb`, the agent iterates on a **trading strategy script** to maximize **profit factor** (a risk-adjusted profitability metric). The agent connects to [Kraken](https://docs.kraken.com/api/) to trade BTC/EUR, runs each strategy variant for a fixed 10-minute window, evaluates the result, keeps or discards, and repeats.
+Adapt the [autoresearch](https://github.com/karpathy/autoresearch) feedback loop for algorithmic trading. Instead of an AI agent iterating on a neural network training script to minimize `val_bpb`, the agent iterates on a **trading strategy script** to maximize **Sharpe ratio** (annualized risk-adjusted return). The agent backtests each strategy variant against months of historical BTC/EUR data from [Kraken](https://docs.kraken.com/api/), evaluates the result in seconds, keeps or discards, and repeats.
 
-The first weeks/months run in **shadow mode** — reading real market data from Kraken's public API but only simulating trades internally. No real orders, no real money. Once the agent has iterated enough to find consistently profitable strategies, we flip the switch to live.
+The backtesting loop uses historical 1-minute OHLC candles downloaded from Kraken's public API — no API key needed. Execution is simulated with realistic slippage and fees. The agent can also validate strategies against live market data via a separate shadow-mode engine. Once the agent has iterated enough to find consistently profitable strategies, we flip the switch to live.
 
 You wake up in the morning to a log of strategy experiments and (hopefully) a profitable algorithm.
 
@@ -15,11 +15,12 @@ You wake up in the morning to a log of strategy experiments and (hopefully) a pr
 | autoresearch | autotrader | notes |
 |---|---|---|
 | `train.py` — model, optimizer, training loop | `strategy.py` — trading logic, signals, position sizing | **the one file the agent edits** |
-| `prepare.py` — data prep, eval, constants | `exchange.py` — Kraken API connection, market data, evaluation harness | **read-only, not modified by agent** |
+| `prepare.py` — data prep, eval, constants | `backtest.py` — historical data, replay engine, evaluation harness | **read-only, primary evaluation** |
+| — | `exchange.py` — Kraken live WebSocket feed, shadow execution engine | **read-only, live validation** |
 | `program.md` — agent instructions | `program.md` — agent instructions (adapted for trading) | **edited by human** |
-| `val_bpb` (lower is better) | profit factor (higher is better), plus secondary metrics | the ground-truth fitness metric |
-| 5-min fixed training budget | 10-min fixed trading window | wall-clock time per experiment |
-| single NVIDIA GPU | no GPU needed — just a Kraken API key and internet | removes the hardware constraint entirely |
+| `val_bpb` (lower is better) | Sharpe ratio (higher is better), plus secondary metrics | the ground-truth fitness metric |
+| 5-min fixed training budget | seconds (historical backtest over 90 days of data) | deterministic, fast iteration |
+| single NVIDIA GPU | no GPU needed — just internet for data download | removes the hardware constraint entirely |
 | `results.tsv` | `results.tsv` | same logging format, different columns |
 
 ---
@@ -28,40 +29,48 @@ You wake up in the morning to a log of strategy experiments and (hopefully) a pr
 
 ```
 autotrader/
-├── exchange.py         # READ-ONLY — Kraken public WS, shadow engine, evaluation, constants
+├── backtest.py         # READ-ONLY — historical data download, replay engine, evaluation
+├── exchange.py         # READ-ONLY — Kraken live WS, shadow engine (live validation)
 ├── strategy.py         # AGENT MODIFIES — trading signals, entry/exit logic, sizing
 ├── program.md          # HUMAN EDITS — agent instructions & constraints
+├── data/               # cached historical OHLC data (untracked)
+│   └── btceur_1m.csv   # 1-minute BTC/EUR candles from Kraken
 ├── results.tsv         # experiment log (untracked)
-├── shadow_ledger.json  # tracks simulated fills in shadow mode (untracked)
 └── pyproject.toml      # dependencies (websockets, numpy, etc.)
 ```
 
-### `exchange.py` (read-only infrastructure)
+### `backtest.py` (read-only — primary evaluation harness)
 
 This is the equivalent of `prepare.py`. The agent never touches it. It provides:
 
-1. **Kraken connection** — public WebSocket client (shadow mode) or authenticated REST + WebSocket (live mode)
-2. **Market data feed** — real-time BTC/EUR price stream via [Kraken WebSocket v2 API](https://docs.kraken.com/api/)
-3. **Shadow execution engine** — simulates order fills against the real-time bid/ask spread, tracks a virtual portfolio internally. No real orders placed. This is our "paper trading" since Kraken doesn't offer paper trading for spot crypto.
-4. **Live execution** (Phase 3) — place real orders via REST API when we're ready
-5. **Account state** — virtual balances, positions, P&L (shadow mode) or real account state (live mode)
-6. **Evaluation harness** — computes profit factor and secondary metrics after each 10-min window
-7. **Safety rails** — hard-coded limits the agent cannot override (see Safety section)
+1. **Historical data download** — fetches 1-minute BTC/EUR OHLC candles from Kraken's public REST API (`GET /0/public/OHLC`), paginates automatically, caches to `data/btceur_1m.csv`. Incremental updates on re-run.
+2. **Replay engine** — iterates through cached candles, builds a tick dict with the exact same interface as the live engine. Synthetic bid/ask from close price +/- estimated spread. Each tick = 1 minute.
+3. **Execution simulation** — simulates order fills with realistic slippage (5 bps) and fees (26 bps, Kraken taker default). Same constants as the live shadow engine. No per-cycle trade cap (backtests span weeks/months).
+4. **Train/test split** — holds out the last 20% of data as a test set. Reports Sharpe on both. Agent optimizes train Sharpe; test Sharpe monitors overfitting.
+5. **Evaluation harness** — computes annualized Sharpe ratio (primary), profit factor, P&L, drawdown, win rate, and other secondary metrics.
 
 Key constants (fixed, not modifiable):
 
 ```python
-TRADING_PAIR = "BTC/EUR"
-CYCLE_DURATION = 600          # 10-minute trading window (seconds)
-MAX_POSITION_EUR = 100        # hard cap on position size
-MAX_LOSS_PER_CYCLE_EUR = 10   # stop-loss per experiment
-MAX_TRADES_PER_CYCLE = 50     # prevent runaway order spam
-TICK_INTERVAL = 1             # strategy called every 1 second
-MODE = "shadow"               # "shadow" or "live" — default shadow
-SHADOW_START_CASH = 500       # virtual starting cash in EUR for shadow mode
+DEFAULT_DAYS = 90             # backtest window
+TEST_FRACTION = 0.20          # last 20% held out as test set
+MINUTES_PER_YEAR = 525_960    # 365.25 * 24 * 60 (crypto trades 24/7)
+SHADOW_START_CASH = 500       # virtual starting cash in EUR
 SHADOW_SLIPPAGE_BPS = 5       # simulated slippage: 5 basis points (0.05%)
 SHADOW_FEE_BPS = 26           # simulated taker fee: 26 bps (0.26%, Kraken default)
+MAX_POSITION_EUR = 100        # hard cap on position size
+SPREAD_BPS = 10               # estimated bid-ask spread for synthetic ticks
 ```
+
+### `exchange.py` (read-only — live validation)
+
+Used for optional live validation of strategies. The agent never touches it. It provides:
+
+1. **Kraken connection** — public WebSocket client (shadow mode) or authenticated REST + WebSocket (live mode)
+2. **Market data feed** — real-time BTC/EUR price stream via [Kraken WebSocket v2 API](https://docs.kraken.com/api/)
+3. **Shadow execution engine** — simulates order fills against the real-time bid/ask spread. This is "paper trading" since Kraken doesn't offer it for spot crypto.
+4. **Live execution** (Phase 3) — place real orders via REST API when ready
+5. **Safety rails** — hard-coded limits the agent cannot override (see Safety section)
 
 ### `strategy.py` (agent modifies this)
 
@@ -74,21 +83,21 @@ class Strategy:
         ...
 
     def on_tick(self, tick: dict) -> Signal | None:
-        """Called every TICK_INTERVAL seconds with latest market data.
+        """Called once per candle (1 minute in backtest, 1 second in live).
         
         tick = {
             "timestamp": float,        # unix timestamp
-            "price": float,            # last trade price
-            "bid": float,              # best bid
-            "ask": float,              # best ask
+            "price": float,            # close price (backtest) or last trade (live)
+            "bid": float,              # best bid (synthetic in backtest)
+            "ask": float,              # best ask (synthetic in backtest)
             "spread": float,           # ask - bid
-            "volume_24h": float,       # 24h volume
-            "history": list[float],    # full price history for this cycle (grows up to 600 ticks)
-            "elapsed": float,          # seconds since cycle start
+            "volume_24h": float,       # rolling 24h volume
+            "history": list[float],    # all previous close prices (grows throughout backtest)
+            "elapsed": float,          # seconds since start
             "position": float,         # current position in BTC (signed)
             "pnl": float,              # unrealized P&L in EUR
             "cash": float,             # available EUR balance
-            "fills": list[dict],       # list of fills so far this cycle
+            "fills": list[dict],       # list of fills so far
         }
 
         Returns Signal("buy", size) / Signal("sell", size) / None
@@ -105,7 +114,7 @@ The agent can change anything inside this file: the indicators, the signal logic
 ### Example baseline `strategy.py`
 
 ```python
-"""Baseline: simple momentum crossover."""
+"""Baseline: simple momentum crossover (minute-level)."""
 
 from dataclasses import dataclass
 
@@ -116,8 +125,8 @@ class Signal:
 
 class Strategy:
     def __init__(self):
-        self.fast_window = 20   # ~20 seconds
-        self.slow_window = 60   # ~60 seconds
+        self.fast_window = 20    # 20 minutes
+        self.slow_window = 60    # 60 minutes (1 hour)
         self.prices = []
         self.position_size = 0.001  # BTC per trade
 
@@ -143,60 +152,64 @@ class Strategy:
 
 ## Evaluation
 
-After each 10-minute window, `exchange.py` computes:
+After each backtest, `backtest.py` computes:
 
-### Primary metric: Profit Factor
+### Primary metric: Annualized Sharpe Ratio
 
 ```
-profit_factor = gross_profit / gross_loss
+sharpe = mean(returns) / std(returns) * sqrt(minutes_per_year)
 ```
 
-Why profit factor over Sharpe ratio:
-- **Stable with few trades.** Sharpe needs many data points to be meaningful. In a 10-minute window we might have 5–30 trades. Profit factor works with any number of closed trades.
-- **Intuitive.** A profit factor of 2.0 means for every €1 lost, €2 was gained. Above 1.0 = profitable, below 1.0 = losing. Industry standard considers 1.75+ as strong for short-term strategies.
-- **Accounts for risk implicitly.** Unlike raw P&L, it penalizes strategies that take big losses even if they occasionally win big.
+Computed from the per-minute equity curve over the **train** portion of the data (first 80%). The **test** Sharpe (last 20%) is reported separately to monitor overfitting.
 
-Edge cases:
-- **Zero trades:** profit factor = 0.0 (neutral baseline). The agent should learn that doing nothing scores zero.
-- **No losses (all trades profitable):** cap at 10.0 to avoid infinity. A strategy with only winners over 10 minutes was probably lucky — we don't want to overreward it.
-- **No wins (all trades losers):** the raw value (0.0). Strategy clearly failed.
-- **Fewer than 3 trades:** profit factor = 0.0. Too few trades to evaluate meaningfully — treat as baseline.
+Why Sharpe ratio (and why we switched from profit factor):
+- **Statistically robust.** With historical backtesting over months of 1-minute data, we get tens of thousands of return observations. Sharpe is the gold standard for evaluating strategies when you have sufficient data.
+- **Risk-adjusted.** A high-return, high-volatility strategy scores lower than a steady earner. This naturally penalizes reckless strategies.
+- **Industry standard.** Sharpe > 1.0 is good, > 2.0 is strong, > 3.0 is exceptional. Directly comparable across strategies and timeframes.
+- **Why not profit factor anymore?** Profit factor was chosen when we were evaluating on live 10-minute windows with 5-30 trades — too few data points for Sharpe to be meaningful. With historical backtesting producing hundreds or thousands of trades, that constraint is gone. Sharpe is strictly better with sufficient data.
+
+Annualization: crypto trades 24/7/365.25, so `minutes_per_year = 525,960`.
 
 ### Secondary metrics (logged but not used for keep/discard)
 
 | metric | description |
 |---|---|
+| `sharpe_test` | Sharpe ratio on the held-out test set (last 20% of data) |
+| `profit_factor` | gross profit / gross loss (capped at 10.0, 0.0 if < 3 trades) |
 | `total_pnl` | net profit/loss in EUR |
 | `num_trades` | total trades executed |
 | `max_drawdown` | worst peak-to-trough drop in EUR |
 | `win_rate` | fraction of profitable trades |
 | `avg_trade_pnl` | average P&L per trade |
-| `sharpe_ratio` | risk-adjusted return (logged for reference) |
 | `time_in_market` | fraction of time with an open position |
 
-### Output format (printed after each cycle)
+### Output format (printed after each backtest)
 
 ```
 ---
+sharpe_ratio:     1.85
+sharpe_test:      1.42
 profit_factor:    2.150000
-total_pnl_eur:    3.42
-num_trades:       11
-max_drawdown_eur: 1.05
-win_rate:         0.636
-sharpe_ratio:     1.23
-time_in_market:   0.52
-cycle_seconds:    600.0
-mode:             shadow
+total_pnl_eur:    47.30
+num_trades:       312
+max_drawdown_eur: 8.20
+win_rate:         0.583
+avg_trade_pnl:    0.1517
+time_in_market:   0.41
+backtest_days:    90.0
+train_days:       72.0
+test_days:        18.0
+mode:             backtest
 ```
 
 ### `results.tsv`
 
 ```
-commit	profit_factor	pnl_eur	num_trades	status	description
-a1b2c3d	0.000000	0.00	0	keep	baseline (momentum crossover)
-b2c3d4e	1.850000	1.23	12	keep	add RSI filter
-c3d4e5f	0.620000	-2.10	45	discard	aggressive scalping (overtrading)
-d4e5f6g	0.000000	0.00	0	crash	division by zero in volatility calc
+commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
+a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
+b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
+c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit)
+d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
 ```
 
 ---
@@ -218,9 +231,13 @@ Based on [Kraken API docs](https://docs.kraken.com/api/):
 | OHLCV candles | **Spot REST** | `GET /0/public/OHLC` (for historical context) |
 | Order book | **Spot REST** | `GET /0/public/Depth` |
 
-### Shadow mode (Phase 1 & 2): Public API only
+### Backtesting (Phase 1 & 2): Public REST API only
 
-Shadow mode only needs the **public** WebSocket — no API key, no authentication. We subscribe to the `ticker` channel for BTC/EUR and get real-time bid/ask/price updates. The shadow execution engine simulates fills locally.
+`backtest.py` uses the **public** OHLC REST endpoint to download historical 1-minute candles. No API key, no authentication. Data is cached locally in `data/btceur_1m.csv` and incrementally updated on re-run. The backtest execution engine simulates fills against historical close prices with synthetic bid/ask spread.
+
+### Live validation (Phase 2): Public WebSocket only
+
+`exchange.py` uses the **public** WebSocket to receive real-time bid/ask/price updates for live shadow validation. No API key needed. The shadow execution engine simulates fills locally.
 
 ### Live mode (Phase 3): Authenticated API
 
@@ -296,22 +313,25 @@ LOOP FOREVER:
 1. Look at git state: current branch/commit
 2. Modify strategy.py with an experimental idea
 3. git commit
-4. Run the experiment: uv run exchange.py > run.log 2>&1
-5. Read out results: grep "^profit_factor:\|^total_pnl_usd:" run.log
+4. Run the backtest: uv run backtest.py > run.log 2>&1
+5. Read out results: grep "^sharpe_ratio:\|^sharpe_test:" run.log
 6. If grep is empty → crash. Read tail of run.log, attempt fix.
 7. Log to results.tsv
-8. If profit_factor improved → keep (advance branch)
-9. If profit_factor is equal or worse → discard (git reset)
+8. If sharpe_ratio improved → keep (advance branch)
+9. If sharpe_ratio is equal or worse → discard (git reset)
+10. Watch for overfitting: if train >> test, discard even if train improved
 ```
 
 ### Key differences from autoresearch loop
 
-- **Must close positions** between experiments. The agent waits for `exchange.py` to confirm flat before starting the next cycle.
-- **Market conditions change.** Unlike autoresearch where `val_bpb` is evaluated on a fixed dataset (deterministic), here the market is the "validation set" and it's non-stationary. Two identical strategies run 10 minutes apart may get different results due to changing volatility, trend, or news. This is inherent noise. Mitigations:
-  - Accept the noise and rely on the trend over many experiments. Over dozens/hundreds of cycles, consistently good strategies will float to the top and lucky flukes will regress.
-  - The agent can reason about this — if a strategy idea has a strong theoretical basis and shows marginal improvement, it might keep it even with a noisy result.
-  - This is actually realistic: real daytrading strategies must be robust to market regime changes. A strategy that only works in specific conditions is fragile and the agent should learn to discard it.
-- **Crashes are less dangerous in shadow mode.** In shadow mode, a crash just loses the virtual state — no real consequences. In live mode, a crash mid-trade could leave an open position. `exchange.py` must have a robust `try/finally` block that closes positions on any exit.
+- **Deterministic feedback.** Like autoresearch's fixed validation set, the backtest uses the same historical data every time. Same strategy = same result. The agent can make incremental changes and reliably tell whether they helped. This was the critical improvement over the original live-trading approach (see Resolved Decisions).
+- **Fast iteration.** Each backtest completes in seconds (not 10 minutes). The agent can run hundreds of experiments per day.
+- **Overfitting is the main risk.** With deterministic backtesting against fixed historical data, the agent can easily overfit to historical noise. Mitigations:
+  - The 80/20 train/test split catches strategies that memorize patterns. If train Sharpe is high but test Sharpe is low, the strategy is overfitting — discard it.
+  - Prefer strategies with a clear theoretical basis (momentum, mean-reversion, volatility breakout) over heavily tuned magic numbers.
+  - Simpler strategies with fewer parameters tend to generalize better.
+  - Periodically validate against live market data using `exchange.py` as a sanity check.
+- **Crashes are harmless.** A crash in backtesting has no consequences — just fix and re-run.
 
 ---
 
@@ -354,43 +374,50 @@ The strategy design space is huge. Some directions:
 
 ## Resolved Decisions
 
-1. **Cycle duration: 10 minutes.** Longer than autoresearch's 5 minutes. BTC/EUR needs enough time for the strategy to take positions and see them play out. 10 minutes gives ~6 experiments/hour, ~50 overnight. This is daytrading, so we want volatility — 10 minutes is a sweet spot between enough data and fast iteration.
+1. **Historical backtesting as primary loop (not live forward-testing).** The original design ran each strategy against a live 10-minute Kraken WebSocket window. This produced 5-30 trades per experiment — statistically meaningless noise. Two identical strategies run 10 minutes apart could score differently due to market conditions. We switched to historical backtesting against months of 1-minute OHLC data: deterministic (same strategy = same result), fast (seconds not minutes), and statistically robust (hundreds/thousands of trades). The live shadow engine (`exchange.py`) is retained for optional validation. See Evaluation section for details.
 
-2. **Primary metric: Profit Factor.** Gross profit / gross loss. Stable with few trades, intuitive (>1.0 = profitable), industry standard for short-term strategies. See Evaluation section for full rationale and edge cases.
+2. **Primary metric: Annualized Sharpe Ratio.** Risk-adjusted return computed from the per-minute equity curve. Sharpe > 1.0 is good, > 2.0 is strong. We originally chose profit factor because it was stable with few trades (a 10-minute window only produces 5-30). With historical backtesting providing thousands of trades, Sharpe is strictly better — it's the industry standard for strategy evaluation. Profit factor is still computed as a secondary metric.
 
-3. **Shadow mode first, live later.** Kraken has no spot paper trading ([only futures demo](https://support.kraken.com/hc/en-us/articles/360026192132-Futures-Demo-Test-accounts)). We build our own shadow execution engine that reads real market data from Kraken's public WebSocket and simulates fills internally with realistic slippage and fees. The agent iterates for days/weeks in shadow mode. Live mode is Phase 3.
+3. **Shadow mode first, live later.** Kraken has no spot paper trading ([only futures demo](https://support.kraken.com/hc/en-us/articles/360026192132-Futures-Demo-Test-accounts)). We build our own execution simulation that models realistic slippage and fees. The agent iterates in backtest mode first. Live validation via `exchange.py` uses Kraken's public WebSocket. Live mode is Phase 3.
 
-4. **Fees: simulated now, potentially zero later.** Shadow mode simulates Kraken's default taker fee (0.26%) so the agent learns to account for transaction costs. If a strategy's edge is eaten by fees, that's a legitimate finding — the agent should discover fee-aware strategies. Note: [Kraken+](https://kraken.com/kraken-plus) (~€4.99/month) offers zero-fee trading up to ~€10K/month but **only on the Kraken web/app, NOT through API trades**. API trades on Kraken Pro still use the [maker/taker fee schedule](https://www.kraken.com/en-us/features/fee-schedule/#kraken-pro) (0.16%/0.26% at low volume, decreasing with higher 30-day volume). So when going live, we configure the fee constant to match your actual Kraken fee tier. Higher volume = lower fees = more strategies become viable.
+4. **Fees: simulated now, potentially zero later.** Both `backtest.py` and `exchange.py` simulate Kraken's default taker fee (0.26%) so the agent learns to account for transaction costs. If a strategy's edge is eaten by fees, that's a legitimate finding — the agent should discover fee-aware strategies. Note: [Kraken+](https://kraken.com/kraken-plus) (~€4.99/month) offers zero-fee trading up to ~€10K/month but **only on the Kraken web/app, NOT through API trades**. API trades on Kraken Pro still use the [maker/taker fee schedule](https://www.kraken.com/en-us/features/fee-schedule/#kraken-pro) (0.16%/0.26% at low volume, decreasing with higher 30-day volume). So when going live, we configure the fee constant to match your actual Kraken fee tier. Higher volume = lower fees = more strategies become viable.
 
-5. **Data context: generous.** The `tick["history"]` buffer holds the full 10-minute price history (600 ticks at 1/sec). The strategy can also request OHLCV candles from Kraken's public REST API for longer historical context. No reason to be stingy — it's just a list of floats in memory.
+5. **Data context: generous.** The `tick["history"]` buffer holds all previous close prices throughout the backtest (growing list, can reach 100K+ entries over 90 days). The strategy slices what it needs. No reason to be stingy — it's just a list of floats in memory.
 
-6. **Quote currency: EUR.** The Kraken account uses EUR, so we trade BTC/EUR. Kraken's BTC/EUR pair has good liquidity (one of the most traded EUR pairs on Kraken) but lower volume than BTC/USD, which may mean slightly wider spreads during low-activity hours. The shadow slippage constant (5 bps) already accounts for this. Fee schedule is identical regardless of quote currency. All P&L, position limits, and cash amounts are denominated in EUR.
+6. **Quote currency: EUR.** The Kraken account uses EUR, so we trade BTC/EUR. Kraken's BTC/EUR pair has good liquidity (one of the most traded EUR pairs on Kraken) but lower volume than BTC/USD, which may mean slightly wider spreads during low-activity hours. The backtest spread estimate (10 bps) and slippage constant (5 bps) account for this. Fee schedule is identical regardless of quote currency. All P&L, position limits, and cash amounts are denominated in EUR.
+
+7. **Tick granularity: 1 minute.** Kraken's public OHLC API provides 1-minute candles — the finest resolution available. Each tick in the backtest represents one 1-minute candle (close price, with synthetic bid/ask). This means strategy parameters should be calibrated in minutes: a 120-tick lookback covers 2 hours. For live validation via `exchange.py`, ticks are 1 second — the strategy should be designed to work at both timescales, or the agent should adapt parameters when switching.
+
+8. **Train/test split: 80/20.** The backtest automatically holds out the last 20% of data as a test set. The agent optimizes train Sharpe; test Sharpe monitors overfitting. With 90 days default, that's 72 days train / 18 days test.
 
 ## Remaining Open Questions
 
-1. **Market hours.** Crypto trades 24/7, which is a plus — the agent can run indefinitely. But volatility varies by time of day. The agent might learn time-of-day patterns.
+1. **Backtest vs. live divergence.** The backtest simulates execution with estimated spread and slippage, but can't model market impact, partial fills, or order book dynamics. Live validation via `exchange.py` helps catch divergence. When going live, run shadow in parallel as a sanity check.
 
-2. **Shadow vs. live divergence.** The shadow engine simulates slippage and fees, but can't model market impact, partial fills, or order book dynamics perfectly. When we go live, we should run shadow in parallel as a sanity check to flag divergence.
+2. **Data staleness.** Historical data is a snapshot. Market microstructure evolves — strategies optimized on old data may not work on future data. Periodically re-download and re-evaluate. Walk-forward validation (re-train on rolling windows) is a future improvement.
 
-3. **Legal/compliance.** Automated trading with Kraken is allowed per their terms but worth reviewing for your jurisdiction. No special license needed for personal use.
+3. **Time-of-day effects.** Crypto trades 24/7 but volatility varies by time of day. The agent might discover time-of-day patterns in the backtest. Whether these generalize to future data is an open question.
+
+4. **Legal/compliance.** Automated trading with Kraken is allowed per their terms but worth reviewing for your jurisdiction. No special license needed for personal use.
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Shadow mode scaffold
+### Phase 1: Infrastructure scaffold
 - [x] Write `exchange.py` with Kraken public WebSocket price feed + shadow execution engine
+- [x] Write `backtest.py` with historical data download, replay engine, Sharpe evaluation
 - [x] Define the `Strategy` interface and write baseline `strategy.py`
-- [x] Implement evaluation harness (profit factor, P&L, drawdown, etc.)
-- [x] Adapt `program.md` for trading context
-- [x] Test manually: run one 10-min cycle and verify metrics
-- [x] No API key needed — shadow mode uses only Kraken's public endpoints
+- [x] Implement evaluation harness (Sharpe ratio, profit factor, P&L, drawdown, etc.)
+- [x] Adapt `program.md` for backtest-first workflow
+- [x] No API key needed — backtesting uses only Kraken's public endpoints
 
-### Phase 2: Agent loop (shadow)
-- [ ] Let the agent loose on `strategy.py` in shadow mode
+### Phase 2: Agent loop (backtest-first)
+- [ ] Let the agent loose on `strategy.py` with `backtest.py` as primary evaluator
 - [ ] Run overnight, review results in the morning
 - [ ] Iterate on `program.md` based on what the agent tries
-- [ ] Run for days/weeks until strategies are consistently profitable
+- [ ] Periodically validate best strategies with live shadow mode (`exchange.py`)
+- [ ] Run for days/weeks until strategies show robust train + test Sharpe
 
 ### Phase 3: Live trading (cautious)
 - [ ] Create restricted Kraken API key (trade only, no withdrawal, BTC/EUR only)

@@ -1,20 +1,23 @@
 # autotrader
 
-Give an AI agent a trading strategy and let it experiment autonomously. It modifies the strategy, runs a 10-minute live-data trading cycle in shadow mode (simulated execution against real Kraken BTC/EUR prices), checks if profit factor improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a profitable algorithm.
+Give an AI agent a trading strategy and let it experiment autonomously. It modifies the strategy, backtests it against months of historical BTC/EUR data in seconds, checks if the Sharpe ratio improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a profitable algorithm.
 
 Adapted from the [autoresearch](https://github.com/karpathy/autoresearch) feedback loop — same hill-climbing structure, but applied to algorithmic trading instead of neural network training.
 
 ## How it works
 
-Three files that matter:
+Four files that matter:
 
-- **`exchange.py`** — fixed infrastructure: Kraken public WebSocket feed, shadow execution engine (simulated fills with realistic slippage + fees), evaluation harness, safety rails. Not modified by the agent.
+- **`backtest.py`** — fixed infrastructure: downloads historical 1-minute OHLC candles from Kraken's public API, replays them through the strategy with simulated execution (realistic slippage + fees), evaluates performance. Not modified by the agent.
+- **`exchange.py`** — fixed infrastructure: Kraken public WebSocket feed for live shadow validation. Simulates execution against real-time prices. Not modified by the agent.
 - **`strategy.py`** — the single file the agent edits. Trading signals, entry/exit logic, position sizing. Everything is fair game: indicators, risk management, regime detection, ensembles. Must maintain the `Strategy` class interface (`__init__`, `on_tick`, `on_fill`).
 - **`program.md`** — agent instructions. Point your agent here and let it go. Edited by the human.
 
-Each experiment runs for a **fixed 10-minute window** against real-time BTC/EUR prices from Kraken's public WebSocket. The metric is **profit factor** (gross profit / gross loss) — higher is better. Above 1.0 is profitable, above 1.75 is strong.
+Each experiment **backtests against 90 days of 1-minute BTC/EUR candles** (configurable). The primary metric is **annualized Sharpe ratio** — higher is better. Above 1.0 is good, above 2.0 is strong. A backtest completes in seconds, enabling fast iteration.
 
-Shadow mode simulates realistic conditions: 0.26% taker fees (Kraken default), 0.05% slippage, position limits (€100 max), and per-cycle loss limits (€10). No API key needed — only public market data.
+The data is split 80/20 into train and test sets. The agent optimizes train Sharpe; test Sharpe monitors overfitting.
+
+Execution simulation models realistic conditions: 0.26% taker fees (Kraken default), 0.05% slippage, €100 max position. No API key needed — only public market data.
 
 ## Quick start
 
@@ -27,11 +30,17 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # Install dependencies
 uv sync
 
-# Run one 10-minute shadow trading cycle
-uv run exchange.py
+# Download historical data from Kraken (cached in data/)
+uv run backtest.py --update-data
 
-# Or a shorter cycle for testing (60 seconds)
-uv run exchange.py --duration 60
+# Run a backtest (completes in seconds)
+uv run backtest.py
+
+# Or with a shorter window for quick tests
+uv run backtest.py --days 30
+
+# Optional: live shadow validation (2-minute cycle against real-time prices)
+uv run exchange.py --duration 120
 ```
 
 ## Running the agent
@@ -42,31 +51,36 @@ Spin up Claude/Codex (or your preferred agent) in this repo, then prompt:
 Hi, have a look at program.md and let's kick off a new experiment!
 ```
 
-The agent reads `program.md`, creates an experiment branch, and begins the autonomous loop: modify strategy → run cycle → evaluate → keep or discard → repeat.
+The agent reads `program.md`, creates an experiment branch, and begins the autonomous loop: modify strategy → run backtest → evaluate → keep or discard → repeat.
 
 ## Project structure
 
 ```
-exchange.py      — Kraken WS feed, shadow engine, evaluation (read-only)
+backtest.py      — historical replay engine, data download, evaluation (read-only)
+exchange.py      — Kraken live WS feed, shadow engine (read-only, for validation)
 strategy.py      — trading strategy (agent modifies this)
 program.md       — agent instructions
 BRAINSTORM.md    — full design document and rationale
 pyproject.toml   — dependencies
+data/            — cached historical OHLC candles (untracked)
 results.tsv      — experiment log (untracked)
 ```
 
 ## Design choices
 
+- **Historical backtesting as primary loop.** The agent iterates against months of historical data, not live market conditions. This gives deterministic, fast, statistically robust feedback. The same strategy always produces the same result — the agent can reliably tell whether a change helped.
 - **Single file to modify.** The agent only touches `strategy.py`. Diffs are reviewable and experiments are isolated.
-- **Fixed time budget.** Every experiment runs for exactly 10 minutes (~6 experiments/hour, ~50 overnight). Results are directly comparable regardless of what the agent changes.
-- **Real market data, simulated execution.** Prices come from Kraken's live WebSocket feed. Execution is simulated internally because Kraken doesn't offer spot paper trading. The shadow engine models slippage, fees, and position limits so strategies that graduate to live mode face no surprises.
-- **Defense in depth.** Hard limits in `exchange.py` (position size, loss per cycle, trade count) cannot be overridden. Cycle isolation ensures no state leaks between experiments.
+- **Fast iteration.** Each backtest completes in seconds (~100K candles replayed). The agent can run hundreds of experiments per day, compared to ~6/hour with the old live-trading approach.
+- **Train/test split.** The last 20% of historical data is held out as a test set. Train Sharpe drives keep/discard; test Sharpe catches overfitting.
+- **Real market data, simulated execution.** Prices come from Kraken's public OHLC API (1-minute candles). Execution is simulated with realistic slippage, fees, and position limits so strategies that graduate to live mode face no surprises.
+- **Live validation available.** `exchange.py` connects to Kraken's real-time WebSocket for optional shadow validation against current market conditions.
+- **Defense in depth.** Hard limits (position size, loss per cycle, trade count) cannot be overridden. The backtest and live engines share the same execution constants.
 - **No GPU, no heavy deps.** Just `websockets` and `numpy`. Runs on any machine with internet.
 
 ## Roadmap
 
-- **Phase 1** ✅ Shadow mode scaffold — exchange, strategy interface, evaluation harness
-- **Phase 2** — Agent loop in shadow mode (run overnight, iterate on strategies)
+- **Phase 1** ✅ Infrastructure scaffold — backtest engine, live shadow engine, strategy interface, evaluation harness
+- **Phase 2** — Agent loop with backtesting (run overnight, iterate on strategies)
 - **Phase 3** — Live trading with restricted Kraken API key
 
 ## License

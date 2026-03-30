@@ -15,6 +15,7 @@ AGENTS.md
 
 # Experiment artifacts
 results.tsv
+data/
 run.log
 .DS_Store
 probe.log
