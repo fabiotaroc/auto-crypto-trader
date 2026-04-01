@@ -29,6 +29,7 @@ import numpy as np
 
 TRADING_PAIR = "XBTEUR"
 KRAKEN_OHLC_URL = "https://api.kraken.com/0/public/OHLC"
+KRAKEN_TRADES_URL = "https://api.kraken.com/0/public/Trades"
 
 DATA_DIR = Path("data")
 DATA_FILE = DATA_DIR / "btceur_1m.csv"
@@ -131,8 +132,158 @@ def _download_range(
     return added
 
 
+def _fetch_trades_page(since_ns: int | None = None) -> tuple[list, int]:
+    """Fetch one page of recent trades from Kraken public API.
+
+    The Trades endpoint retains far more history than the OHLC endpoint
+    (years vs ~12 hours for 1-minute candles). Each page returns up to
+    1000 trades. The ``since`` parameter and the returned ``last`` value
+    are both nanosecond timestamps used for pagination.
+    """
+    params = f"pair={TRADING_PAIR}"
+    if since_ns is not None:
+        params += f"&since={since_ns}"
+    url = f"{KRAKEN_TRADES_URL}?{params}"
+
+    req = urllib.request.Request(url, headers={"User-Agent": "autotrader/0.1"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read())
+
+    if body.get("error"):
+        raise RuntimeError(f"Kraken API error: {body['error']}")
+
+    result = body["result"]
+    trade_key = [k for k in result if k != "last"][0]
+    return result[trade_key], int(result["last"])
+
+
+def _download_trades_range(
+    since: int, until: int, rows: dict[int, list[str]],
+) -> int:
+    """Download trades from Kraken and aggregate into 1-min OHLC candles.
+
+    The OHLC endpoint only retains ~720 one-minute candles (~12 hours).
+    The Trades endpoint has far deeper history, so we download raw trades
+    and build candles ourselves.
+
+    *since* / *until* are Unix timestamps in seconds.
+    """
+    added = 0
+    since_ns = since * 1_000_000_000
+    until_ns = until * 1_000_000_000
+    page = 0
+    retries = 0
+    max_retries = 5
+    total_span = max(1, until - since)
+    last_report_ts = since
+
+    # Accumulate trade data across pages so page-boundary minutes
+    # get all their trades before being committed.
+    buckets: dict[int, dict] = {}
+
+    while since_ns < until_ns:
+        try:
+            trades, last_ns = _fetch_trades_page(since_ns)
+            retries = 0
+        except Exception as e:
+            retries += 1
+            if retries > max_retries:
+                print(
+                    f"  Giving up after {max_retries} retries: {e}",
+                    file=sys.stderr,
+                )
+                break
+            wait = min(30, 2 ** retries)
+            print(
+                f"  Retry {retries}/{max_retries}: {e} "
+                f"(waiting {wait}s)",
+                file=sys.stderr,
+            )
+            time.sleep(wait)
+            continue
+
+        if not trades:
+            break
+
+        for t in trades:
+            price, volume = float(t[0]), float(t[1])
+            trade_ts = float(t[2])
+            if trade_ts >= until:
+                continue
+            minute_ts = int(trade_ts) // 60 * 60
+            if minute_ts in rows:
+                continue
+            if minute_ts not in buckets:
+                buckets[minute_ts] = {
+                    "o": price, "h": price, "l": price, "c": price,
+                    "vol": volume, "vwap_num": price * volume, "cnt": 1,
+                }
+            else:
+                b = buckets[minute_ts]
+                b["h"] = max(b["h"], price)
+                b["l"] = min(b["l"], price)
+                b["c"] = price
+                b["vol"] += volume
+                b["vwap_num"] += price * volume
+                b["cnt"] += 1
+
+        page += 1
+
+        if trades:
+            latest = max(float(t[2]) for t in trades)
+
+            if latest - last_report_ts >= 86400 or page <= 1:
+                pct = (latest - since) / total_span * 100
+                print(
+                    f"  Page {page}: {added + len(buckets)} candles, "
+                    f"up to {_ts_to_str(int(latest))} ({pct:.0f}%)",
+                    file=sys.stderr,
+                )
+                last_report_ts = latest
+
+            # Periodically commit completed buckets and save to disk
+            # so progress is not lost on interruption.
+            if page % 200 == 0:
+                cutoff = int(latest) // 60 * 60
+                for ts in list(buckets):
+                    if ts < cutoff:
+                        b = buckets.pop(ts)
+                        vol = b["vol"]
+                        vwap = b["vwap_num"] / vol if vol > 0 else b["c"]
+                        rows[ts] = [
+                            str(ts), str(b["o"]), str(b["h"]),
+                            str(b["l"]), str(b["c"]),
+                            f"{vwap:.5f}", f"{vol:.8f}", str(b["cnt"]),
+                        ]
+                        added += 1
+                _write_cache(rows)
+
+        if last_ns <= since_ns:
+            break
+        since_ns = last_ns
+        time.sleep(1.5)
+
+    # Commit remaining buckets
+    for ts, b in buckets.items():
+        vol = b["vol"]
+        vwap = b["vwap_num"] / vol if vol > 0 else b["c"]
+        rows[ts] = [
+            str(ts), str(b["o"]), str(b["h"]),
+            str(b["l"]), str(b["c"]),
+            f"{vwap:.5f}", f"{vol:.8f}", str(b["cnt"]),
+        ]
+        added += 1
+
+    return added
+
+
 def download_data(target_days: int = DEFAULT_DAYS):
-    """Download / update cached 1-minute OHLC candles from Kraken."""
+    """Download / update cached 1-minute OHLC candles from Kraken.
+
+    Uses the Trades endpoint for large historical gaps (the OHLC endpoint
+    only retains ~720 one-minute candles) and the faster OHLC endpoint for
+    small incremental updates.
+    """
     rows = _load_cache()
     now = int(time.time())
     target_start = now - target_days * 86400
@@ -144,21 +295,29 @@ def download_data(target_days: int = DEFAULT_DAYS):
             f"{_ts_to_str(earliest)} to {_ts_to_str(latest)}",
             file=sys.stderr,
         )
-        if earliest > target_start:
-            print(f"Backfilling to {_ts_to_str(target_start)}...", file=sys.stderr)
-            n = _download_range(target_start, earliest, rows)
+        if earliest > target_start + 120:
+            print(
+                f"Backfilling to {_ts_to_str(target_start)} "
+                f"via trades API...",
+                file=sys.stderr,
+            )
+            n = _download_trades_range(target_start, earliest, rows)
             print(f"  Backfilled {n} candles", file=sys.stderr)
         print("Updating to present...", file=sys.stderr)
-        n = _download_range(latest, now, rows)
+        gap_minutes = (now - latest) // 60
+        if gap_minutes > 600:
+            n = _download_trades_range(latest, now, rows)
+        else:
+            n = _download_range(latest, now, rows)
         print(f"  Added {n} new candles", file=sys.stderr)
     else:
         print(
             f"No cache. Downloading {target_days} days "
-            f"from {_ts_to_str(target_start)}...",
+            f"from {_ts_to_str(target_start)} via trades API...",
             file=sys.stderr,
         )
-        n = _download_range(target_start, now, rows)
-        print(f"  Downloaded {n} candles", file=sys.stderr)
+        n = _download_trades_range(target_start, now, rows)
+        print(f"  Built {n} candles from trades", file=sys.stderr)
 
     _write_cache(rows)
     print(f"Total cached: {len(rows)} candles", file=sys.stderr)
