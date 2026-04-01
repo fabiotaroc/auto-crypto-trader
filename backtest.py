@@ -39,11 +39,13 @@ TEST_FRACTION = 0.20
 MINUTES_PER_YEAR = 525_960       # 365.25 * 24 * 60 (crypto trades 24/7)
 
 SHADOW_START_CASH = 500.0
+SHADOW_START_BTC = 0.001         # initial BTC holdings
 SHADOW_SLIPPAGE_BPS = 5          # 0.05%
 SHADOW_FEE_BPS = 26              # 0.26% (Kraken taker default)
 MAX_POSITION_EUR = 100
 MIN_ORDER_SIZE_BTC = 0.0001
 SPREAD_BPS = 10                  # estimated bid-ask spread for synthetic ticks
+DECISION_INTERVAL = 15           # strategy is called every 15 candles (minutes)
 
 
 # ---------------------------------------------------------------------------
@@ -370,14 +372,16 @@ class BacktestEngine:
     caps (a backtest spans weeks or months, not a single 10-minute cycle).
     """
 
-    def __init__(self):
+    def __init__(self, start_btc: float = 0.0, initial_price: float = 0.0):
         self.cash: float = SHADOW_START_CASH
-        self.position: float = 0.0
-        self.avg_entry_price: float = 0.0
+        self.position: float = start_btc
+        self.avg_entry_price: float = initial_price if start_btc > 0 else 0.0
         self.fills: list[dict] = []
         self.trade_pnls: list[float] = []
-        self.equity_curve: list[float] = [SHADOW_START_CASH]
-        self.peak_equity: float = SHADOW_START_CASH
+        initial_equity = SHADOW_START_CASH + start_btc * initial_price
+        self.initial_equity: float = initial_equity
+        self.equity_curve: list[float] = [initial_equity]
+        self.peak_equity: float = initial_equity
         self.max_drawdown: float = 0.0
         self.ticks_total: int = 0
         self.ticks_with_position: int = 0
@@ -522,7 +526,7 @@ def compute_metrics(
         else:
             profit_factor = min(10.0, gp / gl)
 
-    total_pnl = engine.cash - SHADOW_START_CASH
+    total_pnl = engine.cash - engine.initial_equity
     win_rate = (sum(1 for p in pnls if p > 0) / n) if n > 0 else 0.0
     avg_pnl = (sum(pnls) / n) if n > 0 else 0.0
     tim = (
@@ -578,7 +582,10 @@ def print_metrics(m: dict):
 
 def run_backtest(candles: np.ndarray, strategy_class) -> dict:
     """Replay historical candles through a strategy and return metrics."""
-    engine = BacktestEngine()
+    first_price = float(candles[0, 4])
+    engine = BacktestEngine(
+        start_btc=SHADOW_START_BTC, initial_price=first_price,
+    )
     strategy = strategy_class()
     history: list[float] = []
     start_ts = float(candles[0, 0])
@@ -602,42 +609,43 @@ def run_backtest(candles: np.ndarray, strategy_class) -> dict:
         if engine.position >= MIN_ORDER_SIZE_BTC:
             engine.ticks_with_position += 1
 
-        tick = {
-            "timestamp": ts,
-            "price": c,
-            "bid": bid,
-            "ask": ask,
-            "spread": spread,
-            "volume_24h": vol_24h,
-            "history": history,
-            "elapsed": ts - start_ts,
-            "position": engine.position,
-            "pnl": engine.unrealized_pnl(c),
-            "cash": engine.cash,
-            "fills": engine.fills,
-        }
+        if i % DECISION_INTERVAL == 0:
+            tick = {
+                "timestamp": ts,
+                "price": c,
+                "bid": bid,
+                "ask": ask,
+                "spread": spread,
+                "volume_24h": vol_24h,
+                "history": history,
+                "elapsed": ts - start_ts,
+                "position": engine.position,
+                "pnl": engine.unrealized_pnl(c),
+                "cash": engine.cash,
+                "fills": engine.fills,
+            }
 
-        try:
-            signal = strategy.on_tick(tick)
-        except Exception as e:
-            print(
-                f"on_tick error at {_ts_to_str(int(ts))}: {e}",
-                file=sys.stderr,
-            )
-            signal = None
+            try:
+                signal = strategy.on_tick(tick)
+            except Exception as e:
+                print(
+                    f"on_tick error at {_ts_to_str(int(ts))}: {e}",
+                    file=sys.stderr,
+                )
+                signal = None
 
-        if signal is not None:
-            fill = engine.execute(signal, bid, ask, ts)
-            if fill is not None:
-                try:
-                    strategy.on_fill(fill)
-                except Exception as e:
-                    print(f"on_fill error: {e}", file=sys.stderr)
+            if signal is not None:
+                fill = engine.execute(signal, bid, ask, ts)
+                if fill is not None:
+                    try:
+                        strategy.on_fill(fill)
+                    except Exception as e:
+                        print(f"on_fill error: {e}", file=sys.stderr)
 
         engine.update_equity(c)
 
         if i in milestones:
-            pnl = engine.cash + engine.position * c - SHADOW_START_CASH
+            pnl = engine.cash + engine.position * c - engine.initial_equity
             print(
                 f"  [{int(milestones[i] * 100):>3d}%] "
                 f"pnl={pnl:+.2f} trades={len(engine.fills)}",

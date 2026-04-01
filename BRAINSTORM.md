@@ -43,11 +43,12 @@ autotrader/
 
 This is the equivalent of `prepare.py`. The agent never touches it. It provides:
 
-1. **Historical data download** — fetches 1-minute BTC/EUR OHLC candles from Kraken's public REST API (`GET /0/public/OHLC`), paginates automatically, caches to `data/btceur_1m.csv`. Incremental updates on re-run.
-2. **Replay engine** — iterates through cached candles, builds a tick dict with the exact same interface as the live engine. Synthetic bid/ask from close price +/- estimated spread. Each tick = 1 minute.
-3. **Execution simulation** — simulates order fills with realistic slippage (5 bps) and fees (26 bps, Kraken taker default). Same constants as the live shadow engine. No per-cycle trade cap (backtests span weeks/months).
-4. **Train/test split** — holds out the last 20% of data as a test set. Reports Sharpe on both. Agent optimizes train Sharpe; test Sharpe monitors overfitting.
-5. **Evaluation harness** — computes annualized Sharpe ratio (primary), profit factor, P&L, drawdown, win rate, and other secondary metrics.
+1. **Historical data download** — fetches 1-minute BTC/EUR OHLC candles from Kraken's public REST API (Trades endpoint for deep history, OHLC for incremental updates), paginates automatically, caches to `data/btceur_1m.csv`. Incremental gap-filling on re-run — only fetches what's missing.
+2. **Replay engine** — iterates through cached 1-minute candles, builds a tick dict with the exact same interface as the live engine. Synthetic bid/ask from close price +/- estimated spread. The strategy is called every 15 minutes (not every candle) but receives the full 1-minute price history for indicator computation.
+3. **Starting portfolio** — the backtest begins with €500 cash + 0.001 BTC. This two-asset model lets the strategy profit in both directions: sell BTC → EUR when bearish, buy BTC with EUR when bullish. No short selling needed.
+4. **Execution simulation** — simulates order fills with realistic slippage (5 bps) and fees (26 bps, Kraken taker default). Same constants as the live shadow engine. No per-cycle trade cap (backtests span weeks/months).
+5. **Train/test split** — holds out the last 20% of data as a test set. Reports Sharpe on both. Agent optimizes train Sharpe; test Sharpe monitors overfitting.
+6. **Evaluation harness** — computes annualized Sharpe ratio (primary), profit factor, P&L, drawdown, win rate, and other secondary metrics.
 
 Key constants (fixed, not modifiable):
 
@@ -56,10 +57,12 @@ DEFAULT_DAYS = 90             # backtest window
 TEST_FRACTION = 0.20          # last 20% held out as test set
 MINUTES_PER_YEAR = 525_960    # 365.25 * 24 * 60 (crypto trades 24/7)
 SHADOW_START_CASH = 500       # virtual starting cash in EUR
+SHADOW_START_BTC = 0.001      # initial BTC holdings (~€75 at current prices)
 SHADOW_SLIPPAGE_BPS = 5       # simulated slippage: 5 basis points (0.05%)
 SHADOW_FEE_BPS = 26           # simulated taker fee: 26 bps (0.26%, Kraken default)
 MAX_POSITION_EUR = 100        # hard cap on position size
 SPREAD_BPS = 10               # estimated bid-ask spread for synthetic ticks
+DECISION_INTERVAL = 15        # strategy called every 15 minutes (not every candle)
 ```
 
 ### `exchange.py` (read-only — live validation)
@@ -83,7 +86,7 @@ class Strategy:
         ...
 
     def on_tick(self, tick: dict) -> Signal | None:
-        """Called once per candle (1 minute in backtest, 1 second in live).
+        """Called every 15 minutes (both backtest and live).
         
         tick = {
             "timestamp": float,        # unix timestamp
@@ -92,11 +95,11 @@ class Strategy:
             "ask": float,              # best ask (synthetic in backtest)
             "spread": float,           # ask - bid
             "volume_24h": float,       # rolling 24h volume
-            "history": list[float],    # all previous close prices (grows throughout backtest)
+            "history": list[float],    # ALL 1-minute close prices so far (full resolution)
             "elapsed": float,          # seconds since start
-            "position": float,         # current position in BTC (signed)
+            "position": float,         # current BTC holdings (starts at 0.001)
             "pnl": float,              # unrealized P&L in EUR
-            "cash": float,             # available EUR balance
+            "cash": float,             # available EUR balance (starts at 500)
             "fills": list[dict],       # list of fills so far
         }
 
@@ -291,7 +294,7 @@ These limits apply in both shadow and live modes — the shadow engine enforces 
 
 ### Layer 4: Cycle isolation
 
-Each 10-minute cycle starts and ends flat (no open positions). If the strategy is discarded, any remaining position is closed before the next experiment. No state leaks between experiments.
+Each backtest experiment is independent — the portfolio starts at the same initial state (€500 + 0.001 BTC) every time. If a strategy is discarded, the next experiment starts fresh. In live mode, the strategy runs continuously with the actual Kraken balance (no artificial resets).
 
 ### Layer 5: Kill switch
 
@@ -314,18 +317,22 @@ LOOP FOREVER:
 2. Modify strategy.py with an experimental idea
 3. git commit
 4. Run the backtest: uv run backtest.py > run.log 2>&1
-5. Read out results: grep "^sharpe_ratio:\|^sharpe_test:" run.log
+5. Read out results: grep "^sharpe_ratio:\|^sharpe_test:\|^num_trades:" run.log
 6. If grep is empty → crash. Read tail of run.log, attempt fix.
 7. Log to results.tsv
-8. If sharpe_ratio improved → keep (advance branch)
-9. If sharpe_ratio is equal or worse → discard (git reset)
-10. Watch for overfitting: if train >> test, discard even if train improved
+8. Keep/discard decision (in order):
+   a. Crash → log, revert
+   b. num_trades < 40 (< 20 round-trips) → discard, too passive
+   c. Train >> test Sharpe → discard, overfitting
+   d. sharpe_ratio improved → keep, advance branch
+   e. Otherwise → discard, git reset
 ```
 
 ### Key differences from autoresearch loop
 
 - **Deterministic feedback.** Like autoresearch's fixed validation set, the backtest uses the same historical data every time. Same strategy = same result. The agent can make incremental changes and reliably tell whether they helped. This was the critical improvement over the original live-trading approach (see Resolved Decisions).
 - **Fast iteration.** Each backtest completes in seconds (not 10 minutes). The agent can run hundreds of experiments per day.
+- **Portfolio rotation, not just long-only.** The agent manages a EUR+BTC portfolio. It can sell BTC to lock in EUR during downtrends and buy BTC during uptrends. This makes the strategy viable in all market conditions without needing short selling.
 - **Overfitting is the main risk.** With deterministic backtesting against fixed historical data, the agent can easily overfit to historical noise. Mitigations:
   - The 80/20 train/test split catches strategies that memorize patterns. If train Sharpe is high but test Sharpe is low, the strategy is overfitting — discard it.
   - Prefer strategies with a clear theoretical basis (momentum, mean-reversion, volatility breakout) over heavily tuned magic numbers.
@@ -386,19 +393,25 @@ The strategy design space is huge. Some directions:
 
 6. **Quote currency: EUR.** The Kraken account uses EUR, so we trade BTC/EUR. Kraken's BTC/EUR pair has good liquidity (one of the most traded EUR pairs on Kraken) but lower volume than BTC/USD, which may mean slightly wider spreads during low-activity hours. The backtest spread estimate (10 bps) and slippage constant (5 bps) account for this. Fee schedule is identical regardless of quote currency. All P&L, position limits, and cash amounts are denominated in EUR.
 
-7. **Tick granularity: 1 minute.** Kraken's public OHLC API provides 1-minute candles — the finest resolution available. Each tick in the backtest represents one 1-minute candle (close price, with synthetic bid/ask). This means strategy parameters should be calibrated in minutes: a 120-tick lookback covers 2 hours. For live validation via `exchange.py`, ticks are 1 second — the strategy should be designed to work at both timescales, or the agent should adapt parameters when switching.
+7. **Data granularity: 1 minute, decision cadence: 15 minutes.** Kraken's public API provides 1-minute candles — the finest resolution available. The cached data and `tick["history"]` retain this full 1-minute resolution for rich indicator computation. However, the strategy is only called every 15 minutes (not every candle). This fixed decision cadence is identical across backtest, shadow, and live modes — no parameter adaptation needed when transitioning between phases. The agent gets ~96 decision points per day.
 
 8. **Train/test split: 80/20.** The backtest automatically holds out the last 20% of data as a test set. The agent optimizes train Sharpe; test Sharpe monitors overfitting. With 90 days default, that's 72 days train / 18 days test.
+
+9. **Two-asset portfolio model (not long-only).** The backtest starts with €500 cash + 0.001 BTC. The previous long-only model (start with cash, buy BTC, sell BTC) meant the optimal strategy in a downtrend was "do nothing" — the agent would give up and sit in cash with Sharpe 0.0. The portfolio model gives the agent something to manage in all market conditions: sell BTC to lock in EUR during drops, buy BTC with EUR during rises. No short selling (Kraken spot doesn't support it), just portfolio rotation between two assets.
+
+10. **Minimum activity requirement.** A strategy that produces fewer than 20 round-trip trades over 90 days is automatically invalid. This prevents the agent from gaming the metric by doing nothing. Combined with the starting BTC position, even a passive strategy now has non-zero (likely negative) Sharpe in a downtrend — the agent must actively beat buy-and-hold.
 
 ## Remaining Open Questions
 
 1. **Backtest vs. live divergence.** The backtest simulates execution with estimated spread and slippage, but can't model market impact, partial fills, or order book dynamics. Live validation via `exchange.py` helps catch divergence. When going live, run shadow in parallel as a sanity check.
 
-2. **Data staleness.** Historical data is a snapshot. Market microstructure evolves — strategies optimized on old data may not work on future data. Periodically re-download and re-evaluate. Walk-forward validation (re-train on rolling windows) is a future improvement.
+2. **Time-of-day effects.** Crypto trades 24/7 but volatility varies by time of day. The agent might discover time-of-day patterns in the backtest. Whether these generalize to future data is an open question.
 
-3. **Time-of-day effects.** Crypto trades 24/7 but volatility varies by time of day. The agent might discover time-of-day patterns in the backtest. Whether these generalize to future data is an open question.
+3. **Legal/compliance.** Automated trading with Kraken is allowed per their terms but worth reviewing for your jurisdiction. No special license needed for personal use.
 
-4. **Legal/compliance.** Automated trading with Kraken is allowed per their terms but worth reviewing for your jurisdiction. No special license needed for personal use.
+4. **Walk-forward validation.** Currently the train/test split is a single static cut. A more robust approach would re-train on rolling windows (e.g. train on months 1-3, test on month 4, then train on months 2-4, test on month 5). This is a future improvement.
+
+*Note: Data staleness was previously an open question. It is now mitigated by requiring `--update-data` at the start of every session (see `program.md`), which incrementally gap-fills the cache to the present.*
 
 ---
 
@@ -411,6 +424,10 @@ The strategy design space is huge. Some directions:
 - [x] Implement evaluation harness (Sharpe ratio, profit factor, P&L, drawdown, etc.)
 - [x] Adapt `program.md` for backtest-first workflow
 - [x] No API key needed — backtesting uses only Kraken's public endpoints
+- [x] Add two-asset portfolio model (€500 cash + 0.001 BTC starting position)
+- [x] Add 15-minute fixed decision cadence (consistent across backtest/shadow/live)
+- [x] Add minimum activity requirement (20+ round-trips) to prevent "do nothing" strategies
+- [x] Add data freshness protocol (`--update-data` at session start)
 
 ### Phase 2: Agent loop (backtest-first)
 - [ ] Let the agent loose on `strategy.py` with `backtest.py` as primary evaluator
@@ -421,9 +438,11 @@ The strategy design space is huge. Some directions:
 
 ### Phase 3: Live trading (cautious)
 - [ ] Create restricted Kraken API key (trade only, no withdrawal, BTC/EUR only)
-- [ ] Fund account with money you're willing to lose
+- [ ] Fund account with €500 EUR + 0.001 BTC (matching backtest starting portfolio)
 - [ ] Switch `MODE = "live"` in `exchange.py`
-- [ ] Run shadow in parallel to detect divergence
+- [ ] **Balance sync after every trade** — after each real order fill, query `POST /0/private/Balance` to get the actual EUR and BTC balances from Kraken. Feed these into the strategy's `tick["position"]` and `tick["cash"]` fields so the agent always knows the true portfolio state. This prevents drift between the internal model and reality (partial fills, rounding, fee discrepancies).
+- [ ] **Reconciliation loop** — every 15-minute decision cycle, before calling `on_tick()`, compare the internal position/cash state with Kraken's reported balances. If they diverge beyond a tolerance (e.g. >0.5%), log a warning and correct the internal state to match Kraken. This catches edge cases like manual trades, failed orders, or API timeouts.
+- [ ] Run shadow in parallel to detect divergence between simulated and real fills
 - [ ] Monitor closely for the first cycles
 - [ ] Adjust `SHADOW_FEE_BPS` to match your actual Kraken fee tier
 

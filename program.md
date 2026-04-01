@@ -13,7 +13,7 @@ To set up a new experiment, work with the user to:
    - `backtest.py` — fixed infrastructure: historical data download, replay engine, execution simulation, evaluation harness. Do not modify.
    - `exchange.py` — fixed infrastructure: Kraken live WebSocket feed, shadow execution engine, safety rails. Do not modify. Used only for optional live validation.
    - `strategy.py` — the file you modify. Trading signals, entry/exit logic, position sizing.
-4. **Ensure historical data is cached**: Run `uv run backtest.py --update-data` to download/update BTC/EUR 1-minute candle data from Kraken's public API. This caches to `data/btceur_1m.csv` and only needs to be done once (incremental updates on re-run).
+4. **Ensure historical data is fresh**: Run `uv run backtest.py --update-data` to download/update BTC/EUR 1-minute candle data from Kraken's public API. This caches to `data/btceur_1m.csv`. Run this at the start of every session to ensure the backtest window includes the latest market data.
 5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
 6. **Confirm and go**: Confirm setup looks good.
 
@@ -33,13 +33,18 @@ Each experiment **backtests the strategy against months of historical BTC/EUR da
 
 **The goal is simple: get the highest sharpe_ratio.** The annualized Sharpe ratio measures risk-adjusted returns over the historical backtest period. A Sharpe above 1.0 is good, above 2.0 is strong. The metric accounts for realistic transaction costs (0.26% simulated Kraken taker fee + 0.05% slippage).
 
+**Starting portfolio:** The backtest starts with **€500 cash + 0.001 BTC**. This means you manage a two-asset portfolio: EUR and BTC. You can sell BTC to lock in EUR (profiting from drops), or buy more BTC with EUR (profiting from rises). This is NOT short selling — you're simply managing how much of each asset you hold. The "do nothing" baseline is holding the initial portfolio, which means your Sharpe must beat buy-and-hold.
+
+**Decision cadence:** The strategy's `on_tick()` is called **once every 15 minutes** (every 15th 1-minute candle). You do not control when you are called — the infrastructure decides. However, `tick["history"]` contains ALL 1-minute close prices accumulated so far, so you have full-resolution data for indicator computation. This 15-minute cadence is identical in backtest, shadow, and live modes — your strategy transfers directly to production without parameter changes.
+
 **Important constraints:**
 - **Deterministic feedback.** Unlike live trading, the same strategy always produces the same result against the same historical data. This means you can make incremental changes and reliably tell whether they helped or hurt.
-- **Timescale is minutes, not seconds.** Each tick in the backtest represents a 1-minute OHLC candle. Window sizes, lookback periods, and cooldowns should be calibrated in minutes. For example, a 120-tick lookback covers 2 hours, not 2 minutes.
+- **Data is 1-minute, decisions are 15-minute.** The cached data contains 1-minute OHLC candles. Your `tick["history"]` list grows by 15 entries between each call to `on_tick()`. Indicator windows should be calibrated in minutes (e.g. a 240-element lookback in history covers 4 hours). You get ~96 decision points per day, ~8640 over 90 days.
 - **Train/test split.** The backtest automatically splits data 80/20 — the first 80% is train (what sharpe_ratio reports), the last 20% is test (what sharpe_test reports). You optimize sharpe_ratio (train). If sharpe_test diverges significantly below sharpe_ratio, the strategy is overfitting to historical patterns.
 - **Overfitting is the main risk.** With deterministic backtesting, it's easy to fit noise. Prefer strategies with a clear theoretical basis (momentum, mean-reversion, volatility breakout) over heavily tuned magic numbers. Simpler strategies generalize better.
-- **Fees matter.** The backtest simulates 0.26% taker fees (Kraken default) and 0.05% slippage. A strategy whose edge is eaten by fees will score poorly. Discover fee-aware strategies that trade less frequently but more profitably.
+- **Fees matter.** The backtest simulates 0.26% taker fees (Kraken default) and 0.05% slippage. A strategy whose edge is eaten by fees will score poorly. The 15-minute cadence naturally encourages strategies that capture larger moves rather than scalping.
 - **Position limits.** The engine enforces €100 max position. Strategies that exceed this get clamped.
+- **Minimum activity.** A strategy that produces fewer than 20 round-trip trades (buy+sell pairs) over the 90-day backtest is invalid. If the market is hostile, find a way to trade it profitably — rotating between BTC and EUR based on conditions — do not opt out. "Do nothing" or "hold forever" are never acceptable final strategies.
 
 **The first run**: Your very first run should always be to establish the baseline, so you will run the experiment as is.
 
@@ -108,18 +113,24 @@ LOOP FOREVER:
 2. Tune `strategy.py` with an experimental idea by directly hacking the code.
 3. git commit
 4. Run the experiment: `uv run backtest.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
-5. Read out the results: `grep "^sharpe_ratio:\|^sharpe_test:" run.log`
+5. Read out the results: `grep "^sharpe_ratio:\|^sharpe_test:\|^num_trades:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
-8. If sharpe_ratio improved (higher), you "advance" the branch, keeping the git commit
-9. If sharpe_ratio is equal or worse, you git reset back to where you started
-10. **Watch for overfitting**: if sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5), the strategy is overfitting. Discard it even if train improved.
+8. **Keep/discard decision** (apply in order):
+   a. If the strategy crashed → log as `crash`, revert.
+   b. If num_trades < 40 (fewer than 20 round-trips) → log as `discard`. The strategy is too passive. Keep iterating.
+   c. If sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5) → log as `discard` (overfitting).
+   d. If sharpe_ratio improved over the current best → `keep`, advance the branch.
+   e. Otherwise → `discard`, git reset back to where you started.
+9. A Sharpe of 0.00 with 0 trades is **never** a valid "keep". That means you haven't found a strategy — keep searching. The starting portfolio already has BTC exposure, so even doing nothing produces a non-zero (likely negative in a downtrend) Sharpe. You must beat that.
 
-The idea is that you are a completely autonomous trading researcher trying things out. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
+The idea is that you are a completely autonomous trading researcher trying things out. You manage a portfolio of EUR and BTC — selling BTC when you expect drops, buying BTC when you expect rises. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
 
 **Speed**: Each backtest takes seconds (not minutes). You can run dozens of experiments per hour. Use this speed to explore broadly — try many different indicator families, timeframes, and approaches.
 
 **Crashes**: If a run crashes (a bug in strategy.py), use your judgment: fix obvious bugs and re-run. If the idea itself is broken, log "crash", revert, and move on.
+
+**Data freshness**: At the start of each session, run `uv run backtest.py --update-data` to ensure the cache includes the latest market data up to now. The backtest window should always end at the present.
 
 **Live validation (optional)**: Periodically, you can validate the current best strategy against live market data using `uv run exchange.py --duration 120 > live.log 2>&1`. This runs a 2-minute live shadow cycle against real-time Kraken prices. It's a sanity check, not the primary metric — live results will differ from backtest due to different market conditions.
 
@@ -127,11 +138,15 @@ The idea is that you are a completely autonomous trading researcher trying thing
 
 ## Strategy design space
 
+You manage a EUR+BTC portfolio. The core question each 15-minute decision point is: **should I be holding more BTC or more EUR right now?**
+
 Some directions to explore:
 
 **Signal generation:** Moving average crossovers (SMA/EMA/WMA), momentum/rate-of-change, mean reversion (Bollinger bands, z-score), RSI, MACD, stochastic oscillator, volatility breakout (ATR-based), price action patterns, spread changes.
 
-**Position sizing:** Fixed size, volatility-scaled (Kelly, ATR-based), confidence-weighted.
+**Portfolio rotation:** Sell BTC → EUR when bearish signals fire, buy BTC with EUR when bullish signals fire. This lets you profit in both up and down markets without short selling.
+
+**Position sizing:** Fixed size, volatility-scaled (Kelly, ATR-based), confidence-weighted. Partial rotations (sell half, keep half) vs. all-or-nothing.
 
 **Risk management:** Stop-loss/take-profit, trailing stops, time-based exits, drawdown circuit breakers.
 
@@ -139,4 +154,4 @@ Some directions to explore:
 
 **Combinations:** Signal ensembles with voting, signal filtering (only trade when multiple indicators agree), adaptive parameters.
 
-**Important note on timescale:** Each tick is a 1-minute candle. Parameters should reflect this — a "fast" moving average might be 10-20 minutes, a "slow" one 60-240 minutes. A cooldown of 5 ticks means 5 minutes. Adjust your intuitions from the old 1-second tick regime.
+**Important note on timescale:** `on_tick()` is called every 15 minutes, but `tick["history"]` contains 1-minute close prices. A 240-element lookback in history covers 4 hours. A "fast" moving average might be 20-60 minutes, a "slow" one 120-480 minutes. You get ~96 decisions per day.
