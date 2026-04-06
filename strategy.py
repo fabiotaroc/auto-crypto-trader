@@ -1,4 +1,4 @@
-"""Risk-off BTC/EUR rotation with tiny uptrend pullback entries."""
+"""Risk-off BTC/EUR rotation with tiny breakout continuation entries."""
 
 from dataclasses import dataclass
 
@@ -17,7 +17,7 @@ class Strategy:
         self.warmup = 1440
 
         self.cooldown_minutes = 720
-        self.max_hold_minutes = 1440
+        self.max_hold_minutes = 2880
         self.min_hold_minutes = 180
 
         self.fast_window = 120
@@ -28,10 +28,10 @@ class Strategy:
         self.breakout_window = 720
         self.rsi_window = 180
 
-        self.stop_loss = -0.010
-        self.take_profit = 0.030
-        self.trail_trigger = 0.015
-        self.trail_gap = 0.008
+        self.stop_loss = -0.0075
+        self.take_profit = 0.060
+        self.trail_trigger = 0.025
+        self.trail_gap = 0.012
 
         self.entry_price = None
         self.entry_minute = None
@@ -84,19 +84,19 @@ class Strategy:
         spread_bps = tick["spread"] / price * 10_000
         rsi = self._rsi(prices_arr[-self.rsi_window:])
 
-        regime_ok = price > slow and medium > slow and day_momentum > 0.0
-        trend_ok = fast > slow * 1.0005 and medium_momentum > 0.004
-        pullback_entry = (
-            -0.015 < distance_from_mean < -0.004
-            and -2.0 < zscore < -0.45
-            and -0.009 < short_momentum < 0.001
-            and price < breakout_level * 0.997
+        regime_ok = price > slow * 1.002 and medium > slow and day_momentum > 0.0
+        trend_ok = fast > medium * 1.001 and medium_momentum > 0.009
+        breakout_entry = (
+            price >= breakout_level * 1.001
+            and short_momentum > 0.005
+            and distance_from_mean > -0.002
+            and zscore > -0.25
         )
-        rsi_ok = 34.0 <= rsi <= 52.0
+        rsi_ok = 52.0 <= rsi <= 72.0
         vol_ok = 0.00045 < realized_vol < 0.0035
         liquidity_ok = spread_bps <= 15.0
 
-        if regime_ok and trend_ok and pullback_entry and rsi_ok and vol_ok and liquidity_ok:
+        if regime_ok and trend_ok and breakout_entry and rsi_ok and vol_ok and liquidity_ok:
             return Signal("buy", self.trade_size)
 
         return None
@@ -148,13 +148,13 @@ class Strategy:
         if fast < medium and medium_momentum < -0.004:
             return Signal("sell", tick["position"])
 
-        if zscore > 0.85 and pnl_pct > 0.002:
+        if zscore > 2.10 and pnl_pct > 0.010:
             return Signal("sell", tick["position"])
 
-        if rsi > 63.0 and pnl_pct > 0:
+        if rsi > 84.0 and pnl_pct > 0.006:
             return Signal("sell", tick["position"])
 
-        if mean_distance > 0.008 and pnl_pct > 0.002:
+        if mean_distance > 0.030 and pnl_pct > 0.012:
             return Signal("sell", tick["position"])
 
         if hold_minutes >= self.max_hold_minutes:
