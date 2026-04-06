@@ -1,4 +1,4 @@
-"""Momentum and mean-reversion portfolio rotation strategy."""
+"""Active BTC/EUR rotation strategy using trend and z-score signals."""
 
 from dataclasses import dataclass
 
@@ -13,22 +13,23 @@ class Signal:
 
 class Strategy:
     def __init__(self):
-        self.trade_size = 0.0012
-        self.warmup = 360
+        self.trade_size = 0.00125
+        self.warmup = 240
 
-        self.cooldown_minutes = 30
-        self.max_hold_minutes = 360
-        self.min_hold_minutes = 30
+        self.cooldown_minutes = 15
+        self.max_hold_minutes = 240
+        self.min_hold_minutes = 15
 
-        self.fast_window = 45
-        self.slow_window = 240
-        self.mean_window = 90
-        self.vol_window = 180
+        self.fast_window = 30
+        self.slow_window = 180
+        self.mean_window = 60
+        self.vol_window = 120
+        self.breakout_window = 180
 
-        self.stop_loss = -0.008
-        self.take_profit = 0.014
-        self.trail_trigger = 0.007
-        self.trail_gap = 0.0045
+        self.stop_loss = -0.010
+        self.take_profit = 0.018
+        self.trail_trigger = 0.010
+        self.trail_gap = 0.005
 
         self.entry_price = None
         self.entry_minute = None
@@ -64,28 +65,33 @@ class Strategy:
         fast = float(np.mean(prices_arr[-self.fast_window:]))
         slow = float(np.mean(prices_arr[-self.slow_window:]))
         entry_mean = float(np.mean(prices_arr[-self.mean_window:]))
+        entry_std = float(np.std(prices_arr[-self.mean_window:]))
 
         returns = np.diff(prices_arr[-self.vol_window:]) / np.maximum(
             prices_arr[-self.vol_window:-1], 1e-9
         )
         realized_vol = float(np.std(returns)) if len(returns) else 0.0
 
-        trend_strength = price / slow - 1.0
         short_momentum = price / prices_arr[-30] - 1.0
-        medium_momentum = price / prices_arr[-120] - 1.0
-        long_momentum = price / prices_arr[-360] - 1.0
-        pullback = price / float(np.max(prices_arr[-60:])) - 1.0
+        medium_momentum = price / prices_arr[-90] - 1.0
         distance_from_mean = price / entry_mean - 1.0
+        zscore = (price - entry_mean) / max(entry_std, 1e-9)
         spread_bps = tick["spread"] / price * 10_000
+        breakout_level = float(np.max(prices_arr[-self.breakout_window:-15]))
 
-        trend_ok = fast > slow and trend_strength > 0.0015
-        pullback_ok = -0.015 < pullback < -0.002 and distance_from_mean < -0.001
-        momentum_ok = short_momentum > -0.004 and medium_momentum > -0.002
-        long_bias_ok = long_momentum > -0.01
-        vol_ok = 0.0007 < realized_vol < 0.007
+        trend_buy = (
+            fast > slow * 1.0003
+            and medium_momentum > -0.003
+            and short_momentum > -0.004
+            and zscore < 0.35
+        )
+        dip_buy = zscore < -0.85 and short_momentum > -0.008 and fast >= slow * 0.998
+        breakout_buy = price >= breakout_level * 0.9995 and short_momentum > 0.003
+        value_buy = distance_from_mean < -0.0035 and medium_momentum > -0.01
+        vol_ok = 0.0005 < realized_vol < 0.009
         liquidity_ok = spread_bps <= 15.0
 
-        if trend_ok and pullback_ok and momentum_ok and long_bias_ok and vol_ok and liquidity_ok:
+        if liquidity_ok and vol_ok and (trend_buy or dip_buy or breakout_buy or value_buy):
             return Signal("buy", self.trade_size)
 
         return None
@@ -113,22 +119,24 @@ class Strategy:
 
         prices_arr = np.asarray(prices, dtype=float)
         fast = float(np.mean(prices_arr[-30:]))
-        medium = float(np.mean(prices_arr[-90:]))
-        slow = float(np.mean(prices_arr[-240:]))
+        medium = float(np.mean(prices_arr[-60:]))
+        slow = float(np.mean(prices_arr[-180:]))
+        medium_std = float(np.std(prices_arr[-60:]))
         short_momentum = price / prices_arr[-15] - 1.0
         medium_momentum = price / prices_arr[-60] - 1.0
         mean_distance = price / medium - 1.0
+        zscore = (price - medium) / max(medium_std, 1e-9)
 
-        if price < medium and short_momentum < -0.002:
+        if price < medium and short_momentum < -0.003:
             return Signal("sell", tick["position"])
 
-        if fast < medium and medium < slow:
+        if fast < slow * 0.9995 and medium_momentum < -0.003:
             return Signal("sell", tick["position"])
 
-        if mean_distance > 0.01 and pnl_pct > 0:
+        if zscore > 0.95 and pnl_pct > -0.001:
             return Signal("sell", tick["position"])
 
-        if medium_momentum < -0.006:
+        if mean_distance > 0.012 and pnl_pct > 0:
             return Signal("sell", tick["position"])
 
         if hold_minutes >= self.max_hold_minutes:
