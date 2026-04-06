@@ -8,10 +8,10 @@ Adapted from the [autoresearch](https://github.com/karpathy/autoresearch) feedba
 
 Four files that matter:
 
-- **`backtest.py`** — fixed infrastructure: downloads historical 1-minute OHLC candles from Kraken's public API, replays them through the strategy with simulated execution (realistic slippage + fees), evaluates performance. Not modified by the agent.
-- **`exchange.py`** — fixed infrastructure: Kraken public WebSocket feed for live shadow validation. Simulates execution against real-time prices. Not modified by the agent.
-- **`strategy.py`** — the single file the agent edits. Trading signals, entry/exit logic, position sizing. Everything is fair game: indicators, risk management, regime detection, ensembles. Must maintain the `Strategy` class interface (`__init__`, `on_tick`, `on_fill`).
-- **`program.md`** — agent instructions. Point your agent here and let it go. Edited by the human.
+- `**backtest.py**` — fixed infrastructure: downloads historical 1-minute OHLC candles from Kraken's public API, replays them through the strategy with simulated execution (realistic slippage + fees), evaluates performance. Not modified by the agent.
+- `**exchange.py**` — fixed infrastructure: Kraken public WebSocket feed for live shadow validation. Simulates execution against real-time prices. Not modified by the agent.
+- `**strategy.py**` — the single file the agent edits. Trading signals, entry/exit logic, position sizing. Everything is fair game: indicators, risk management, regime detection, ensembles. Must maintain the `Strategy` class interface (`__init__`, `on_tick`, `on_fill`).
+- `**program.md**` — agent instructions. Point your agent here and let it go. Edited by the human.
 
 Each experiment **backtests against 90 days of 1-minute BTC/EUR candles** (configurable). The primary metric is **annualized Sharpe ratio** — higher is better. Above 1.0 is good, above 2.0 is strong. A backtest completes in seconds, enabling fast iteration.
 
@@ -61,10 +61,17 @@ exchange.py      — Kraken live WS feed, shadow engine (read-only, for validati
 strategy.py      — trading strategy (agent modifies this)
 program.md       — agent instructions
 BRAINSTORM.md    — full design document and rationale
+docs/            — architecture docs and phase walkthroughs
 pyproject.toml   — dependencies
 data/            — cached historical OHLC candles (untracked)
 results.tsv      — experiment log (untracked)
 ```
+
+## Documentation
+
+- Architecture walkthrough: `docs/system-architecture/README.md`
+- Phase-by-phase system docs: `docs/system-architecture/`
+- Full project plan and rationale: `BRAINSTORM.md`
 
 ## Design choices
 
@@ -82,6 +89,8 @@ results.tsv      — experiment log (untracked)
 - **Phase 1** ✅ Infrastructure scaffold — backtest engine, live shadow engine, strategy interface, evaluation harness
 - **Phase 2** — Agent loop with backtesting (run overnight, iterate on strategies)
 - **Phase 3** — Live trading with restricted Kraken API key
+
+For the detailed project plan behind these phases, see `BRAINSTORM.md`.
 
 ## License
 
