@@ -43,7 +43,7 @@ class Strategy:
 
         price = float(tick["price"])
         position = float(tick["position"])
-        minute = int(tick["elapsed"] // 60)
+        minute = int(tick["timestamp"] // 60)
 
         if position > 0 and self.entry_price is None:
             # The harness starts with BTC inventory, so bootstrap the trade state
