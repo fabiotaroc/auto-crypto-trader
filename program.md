@@ -9,10 +9,9 @@ To set up a new experiment, work with the user to:
 1. **Agree on a run tag**: propose a date-based tag for this run (prefer ISO style, e.g. `2026-04-06`, add a suffix like `-b` if needed). The branch `autotrader/<tag>` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b autotrader/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
-   - `BRAINSTORM.md` — full design document and rationale.
-   - `backtest.py` — fixed infrastructure: historical data download, replay engine, execution simulation, evaluation harness. Do not modify.
-   - `exchange.py` — fixed infrastructure: Kraken live WebSocket feed, shadow execution engine, safety rails. Do not modify. Used only for optional live validation.
-   - `strategy.py` — the file you modify. Trading signals, entry/exit logic, position sizing.
+  - `backtest.py` — fixed infrastructure: historical data download, replay engine, execution simulation, evaluation harness. Do not modify.
+  - `exchange.py` — fixed infrastructure: Kraken live WebSocket feed, shadow execution engine, safety rails. Do not modify. Used only for optional live validation.
+  - `strategy.py` — the file you modify. Trading signals, entry/exit logic, position sizing.
 4. **Ensure historical data is fresh**: Run `uv run backtest.py --update-data` to download/update BTC/EUR 1-minute candle data from Kraken's public API. This caches to `data/btceur_1m.csv`. Run this at the start of every session to ensure the backtest window includes the latest market data.
 5. **Initialize results.tsv safely**: `results.tsv` is a persistent local experiment ledger across runs. If it does not exist, create it with the header row below. If it already exists, preserve its contents and keep appending new rows. Never clear it automatically at the start of a run.
 6. **Confirm and go**: Confirm setup looks good.
@@ -24,9 +23,11 @@ Once you get confirmation, kick off the experimentation.
 Each experiment **backtests the strategy against months of historical BTC/EUR data** — replaying tens of thousands of 1-minute candles with simulated execution (realistic slippage + fees). A single backtest completes in seconds, giving you fast, deterministic feedback. You launch it simply as: `uv run backtest.py`.
 
 **What you CAN do:**
+
 - Modify `strategy.py` — this is the only file you edit. Everything is fair game: indicators, signal logic, position sizing, risk management, regime detection, ensemble methods. The only constraint is maintaining the `Strategy` class interface (`__init__`, `on_tick`, `on_fill`) and the `Signal` dataclass.
 
 **What you CANNOT do:**
+
 - Modify `backtest.py` or `exchange.py`. They are read-only. They contain the fixed evaluation, execution simulation, and constants.
 - Install new packages or add dependencies. You can only use what's already in `pyproject.toml`.
 - Modify the evaluation harness. The metrics computed by `backtest.py` are the ground truth.
@@ -38,6 +39,7 @@ Each experiment **backtests the strategy against months of historical BTC/EUR da
 **Decision cadence:** The strategy's `on_tick()` is called **once every 15 minutes** (every 15th 1-minute candle). You do not control when you are called — the infrastructure decides. However, `tick["history"]` contains ALL 1-minute close prices accumulated so far, so you have full-resolution data for indicator computation. This 15-minute cadence is identical in backtest, shadow, and live modes — your strategy transfers directly to production without parameter changes.
 
 **Important constraints:**
+
 - **Deterministic feedback.** Unlike live trading, the same strategy always produces the same result against the same historical data. This means you can make incremental changes and reliably tell whether they helped or hurt.
 - **Data is 1-minute, decisions are 15-minute.** The cached data contains 1-minute OHLC candles. Your `tick["history"]` list grows by 15 entries between each call to `on_tick()`. Indicator windows should be calibrated in minutes (e.g. a 240-element lookback in history covers 4 hours). You get ~96 decision points per day, ~8640 over 90 days.
 - **Train/test split.** The backtest automatically splits data 80/20 — the first 80% is train (what sharpe_ratio reports), the last 20% is test (what sharpe_test reports). You optimize sharpe_ratio (train). If sharpe_test diverges significantly below sharpe_ratio, the strategy is overfitting to historical patterns.
@@ -112,18 +114,21 @@ LOOP FOREVER:
 
 1. Look at the git state: the current branch/commit we're on
 2. Tune `strategy.py` with an experimental idea by directly hacking the code.
-3. git commit
+3. git commit (temporary unless the run is later marked `keep`)
 4. Run the experiment: `uv run backtest.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^sharpe_ratio:\|^sharpe_test:\|^num_trades:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
 7. Record the results in the tsv with the active `run_tag` (NOTE: do not commit the results.tsv file, leave it untracked by git)
 8. **Keep/discard decision** (apply in order):
-   a. If the strategy crashed → log as `crash`, revert.
-   b. If num_trades < 40 (fewer than 20 round-trips) → log as `discard`. The strategy is too passive. Keep iterating.
-   c. If sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5) → log as `discard` (overfitting).
-   d. If sharpe_ratio improved over the current best within the active `run_tag` → `keep`, advance the branch.
-   e. Otherwise → `discard`, git reset back to where you started.
-9. A Sharpe of 0.00 with 0 trades is **never** a valid "keep". That means you haven't found a strategy — keep searching. The starting portfolio already has BTC exposure, so even doing nothing produces a non-zero (likely negative in a downtrend) Sharpe. You must beat that.
+  a. If the strategy crashed → log as `crash`, revert.
+  b. If num_trades < 30 → log as `discard`. The strategy is too passive. Keep iterating.
+  c. If sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5) → log as `discard` (overfitting).
+  d. If there is no prior `keep` in this `run_tag` with `num_trades >= 30`, then the first run with `num_trades >= 30` becomes the active baseline → `keep`.
+  e. Otherwise, if sharpe_ratio improved over the current best active `keep` within the `run_tag` → `keep`, advance the branch.
+  f. Otherwise, if sharpe_ratio is within 0.50 of the current best active `keep` and either sharpe_test or pnl_eur improved → `keep`.
+  g. Otherwise → `discard`, git reset back to where you started.
+9. Only `keep` commits stay on the branch. `discard` and `crash` commits are temporary checkpoints used for logging; after recording the result, reset them off the branch tip/history before the next experiment.
+10. A Sharpe of 0.00 with 0 trades is **never** a valid "keep". That means you haven't found a strategy — keep searching. The starting portfolio already has BTC exposure, so even doing nothing produces a non-zero (likely negative in a downtrend) Sharpe. You must beat that.
 
 The idea is that you are a completely autonomous trading researcher trying things out. You manage a portfolio of EUR and BTC — selling BTC when you expect drops, buying BTC when you expect rises. If they work, keep. If they don't, discard. And you're advancing the branch so that you can iterate.
 
