@@ -1,8 +1,8 @@
 # System Architecture
 
-This folder explains how `autotrader` works end to end, organized by the same phases defined in `BRAINSTORM.md`.
+This folder explains how `autotrader` works end to end, organized by the same phases defined in `spec.md`.
 
-If you want the project rationale and roadmap source of truth, start with `BRAINSTORM.md`. If you want the operational view of the system, start here.
+If you want the project rationale and roadmap source of truth, start with `spec.md`. If you want the operational view of the system, start here.
 
 ## Phase Map
 
@@ -15,7 +15,7 @@ If you want the project rationale and roadmap source of truth, start with `BRAIN
 ```mermaid
 flowchart LR
     Human[Human operator]
-    Brainstorm[BRAINSTORM.md<br/>design + roadmap]
+    Brainstorm[spec.md<br/>design + roadmap]
     Program[program.md<br/>agent instructions]
     Agent[LLM agent]
     Strategy[strategy.py<br/>editable strategy]

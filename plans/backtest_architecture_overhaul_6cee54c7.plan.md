@@ -15,7 +15,7 @@ todos:
     content: "Rewrite program.md: backtest-first experiment loop, Sharpe as primary metric, new results.tsv format, optional live validation step"
     status: completed
   - id: brainstorm-update
-    content: "Update BRAINSTORM.md: architecture, evaluation (Sharpe rationale), experiment loop, mapping table, resolved decisions, implementation plan"
+    content: "Update spec.md: architecture, evaluation (Sharpe rationale), experiment loop, mapping table, resolved decisions, implementation plan"
     status: completed
   - id: readme-update
     content: "Update README.md: description, how it works, quick start, project structure, design choices"
@@ -123,7 +123,7 @@ The agent instructions change substantially:
 - **Key differences section**: Deterministic feedback (same data = same result), fast iteration (hundreds/day), overfitting risk (new concern to watch for).
 - **results.tsv format**: `run_tag	commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description`
 
-### 4. MODIFY: [BRAINSTORM.md](BRAINSTORM.md)
+### 4. MODIFY: [spec.md](spec.md)
 
 Update these sections:
 

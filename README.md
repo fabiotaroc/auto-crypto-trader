@@ -60,7 +60,7 @@ backtest.py      — historical replay engine, data download, evaluation (read-o
 exchange.py      — Kraken live WS feed, shadow engine (read-only, for validation)
 strategy.py      — trading strategy (agent modifies this)
 program.md       — agent instructions
-BRAINSTORM.md    — full design document and rationale
+ spec.md          — full design document and rationale
 docs/            — architecture docs and phase walkthroughs
 pyproject.toml   — dependencies
 data/            — cached historical OHLC candles (untracked)
@@ -71,7 +71,7 @@ results.tsv      — persistent experiment log with `run_tag` history (untracked
 
 - Architecture walkthrough: `docs/system-architecture/README.md`
 - Phase-by-phase system docs: `docs/system-architecture/`
-- Full project plan and rationale: `BRAINSTORM.md`
+- Full project plan and rationale: `spec.md`
 
 ## Design choices
 
@@ -90,7 +90,7 @@ results.tsv      — persistent experiment log with `run_tag` history (untracked
 - **Phase 2** — Agent loop with backtesting (run overnight, iterate on strategies)
 - **Phase 3** — Live trading with restricted Kraken API key
 
-For the detailed project plan behind these phases, see `BRAINSTORM.md`.
+For the detailed project plan behind these phases, see `spec.md`.
 
 ## License
 

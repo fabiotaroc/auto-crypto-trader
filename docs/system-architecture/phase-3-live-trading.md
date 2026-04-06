@@ -1,6 +1,6 @@
 # Phase 3: Live Trading
 
-Phase 3 is the cautious handoff from research to real execution. In `BRAINSTORM.md`, this phase is explicitly gated behind strong backtest results and shadow validation.
+Phase 3 is the cautious handoff from research to real execution. In `spec.md`, this phase is explicitly gated behind strong backtest results and shadow validation.
 
 ## Planned Live Architecture
 
@@ -73,4 +73,4 @@ flowchart LR
 
 ## Current Status
 
-This phase is mostly planned rather than implemented. The repository already has the shadow runtime and safety mindset, but real order placement, balance synchronization, and full reconciliation remain future work called out in `BRAINSTORM.md`.
+This phase is mostly planned rather than implemented. The repository already has the shadow runtime and safety mindset, but real order placement, balance synchronization, and full reconciliation remain future work called out in `spec.md`.

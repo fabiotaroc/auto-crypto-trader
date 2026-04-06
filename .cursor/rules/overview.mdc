@@ -1,0 +1,37 @@
+---
+description: Concise project context for developing the autotrader harness
+alwaysApply: true
+---
+
+# Autotrader Harness Overview
+
+This repo is an agent harness for autonomous strategy research, not a generic bot template.
+
+## Objective
+
+- Help the user make money by improving risk-adjusted trading performance through a robust, safe, and repeatable research loop.
+
+## Project boundaries
+
+- Fixed infra: `backtest.py` and `exchange.py` own data, execution model, safety rails, and metrics.
+- Strategy surface: `strategy.py` is where experiment logic changes.
+- Protocol: `program.md` defines autonomous tuning behavior.
+- History: `results.tsv` is the run ledger keyed by `run_tag`.
+
+## Source of truth
+
+- `README.md` for current workflow.
+- `spec.md` for rationale and roadmap.
+- `docs/system-architecture/` for phase architecture.
+- `program.md` for agent loop instructions.
+
+## Harness-first priorities
+
+- Keep evaluator invariants stable and auditable.
+- Improve backtest/live parity while documenting intentional gaps.
+- Improve reliability, safety, reconciliation, and observability.
+
+## Scope guardrails
+
+- Default to harness/protocol changes unless the user explicitly asks for strategy alpha logic.
+- If ambiguous, ask whether to change harness (`backtest.py`, `exchange.py`, docs, protocol) or strategy (`strategy.py`).
