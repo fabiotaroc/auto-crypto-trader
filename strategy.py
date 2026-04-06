@@ -16,9 +16,9 @@ class Strategy:
         self.trade_size = 0.00125
         self.warmup = 720
 
-        self.cooldown_minutes = 360
-        self.max_hold_minutes = 1440
-        self.min_hold_minutes = 180
+        self.cooldown_minutes = 720
+        self.max_hold_minutes = 2880
+        self.min_hold_minutes = 240
 
         self.fast_window = 60
         self.slow_window = 720
@@ -26,10 +26,10 @@ class Strategy:
         self.vol_window = 360
         self.breakout_window = 720
 
-        self.stop_loss = -0.015
-        self.take_profit = 0.030
-        self.trail_trigger = 0.015
-        self.trail_gap = 0.007
+        self.stop_loss = -0.013
+        self.take_profit = 0.040
+        self.trail_trigger = 0.020
+        self.trail_gap = 0.008
 
         self.entry_price = None
         self.entry_minute = None
@@ -82,24 +82,24 @@ class Strategy:
         trend_strength = fast / slow - 1.0
 
         trend_buy = (
-            trend_strength > 0.004
-            and medium_momentum > 0.010
-            and short_momentum > -0.004
-            and -1.4 < zscore < -0.25
+            trend_strength > 0.006
+            and medium_momentum > 0.014
+            and short_momentum > -0.002
+            and -1.2 < zscore < -0.20
         )
         dip_buy = (
-            zscore < -1.55
-            and trend_strength > 0.002
-            and medium_momentum > 0.006
-            and short_momentum > -0.005
+            zscore < -1.80
+            and trend_strength > 0.003
+            and medium_momentum > 0.010
+            and short_momentum > -0.004
         )
         breakout_buy = (
-            price >= breakout_level * 1.001
-            and medium_momentum > 0.012
-            and short_momentum > 0.004
+            price >= breakout_level * 1.002
+            and medium_momentum > 0.015
+            and short_momentum > 0.006
         )
-        value_buy = long_momentum > 0.02 and distance_from_mean < -0.007 and medium_momentum > 0.008
-        vol_ok = 0.0005 < realized_vol < 0.0045
+        value_buy = False
+        vol_ok = 0.0005 < realized_vol < 0.0038
         liquidity_ok = spread_bps <= 15.0
 
         if liquidity_ok and vol_ok and (trend_buy or dip_buy or breakout_buy or value_buy):
@@ -138,16 +138,16 @@ class Strategy:
         mean_distance = price / medium - 1.0
         zscore = (price - medium) / max(medium_std, 1e-9)
 
-        if price < medium and short_momentum < -0.008:
+        if price < medium and short_momentum < -0.010:
             return Signal("sell", tick["position"])
 
-        if fast < slow * 0.999 and medium_momentum < -0.002:
+        if fast < slow * 0.9985 and medium_momentum < -0.004:
             return Signal("sell", tick["position"])
 
-        if zscore > 1.60 and pnl_pct > 0.004:
+        if zscore > 1.80 and pnl_pct > 0.006:
             return Signal("sell", tick["position"])
 
-        if mean_distance > 0.020 and pnl_pct > 0.006:
+        if mean_distance > 0.025 and pnl_pct > 0.010:
             return Signal("sell", tick["position"])
 
         if hold_minutes >= self.max_hold_minutes:
