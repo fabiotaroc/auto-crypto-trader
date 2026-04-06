@@ -208,11 +208,11 @@ mode:             backtest
 ### `results.tsv`
 
 ```
-commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
-a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
-b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
-c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit)
-d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
+run_tag	commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
+2026-04-06	a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
+2026-04-06	b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
+2026-04-06	c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit)
+2026-04-06	d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
 ```
 
 ---

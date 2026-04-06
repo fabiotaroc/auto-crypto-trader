@@ -121,7 +121,7 @@ The agent instructions change substantially:
 - **Keep/discard on train Sharpe**, but monitor test Sharpe for overfitting divergence.
 - **Live validation**: Optional step -- periodically run `uv run exchange.py --duration 120` (2-min live cycle) to sanity-check on real market data.
 - **Key differences section**: Deterministic feedback (same data = same result), fast iteration (hundreds/day), overfitting risk (new concern to watch for).
-- **results.tsv format**: `commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description`
+- **results.tsv format**: `run_tag	commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description`
 
 ### 4. MODIFY: [BRAINSTORM.md](BRAINSTORM.md)
 

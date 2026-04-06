@@ -6,7 +6,7 @@ This is an experiment to have the LLM iterate on trading strategies autonomously
 
 To set up a new experiment, work with the user to:
 
-1. **Agree on a run tag**: propose a tag based on today's date (e.g. `mar30`). The branch `autotrader/<tag>` must not already exist — this is a fresh run.
+1. **Agree on a run tag**: propose a date-based tag for this run (prefer ISO style, e.g. `2026-04-06`, add a suffix like `-b` if needed). The branch `autotrader/<tag>` must not already exist — this is a fresh run.
 2. **Create the branch**: `git checkout -b autotrader/<tag>` from current master.
 3. **Read the in-scope files**: The repo is small. Read these files for full context:
    - `BRAINSTORM.md` — full design document and rationale.
@@ -14,7 +14,7 @@ To set up a new experiment, work with the user to:
    - `exchange.py` — fixed infrastructure: Kraken live WebSocket feed, shadow execution engine, safety rails. Do not modify. Used only for optional live validation.
    - `strategy.py` — the file you modify. Trading signals, entry/exit logic, position sizing.
 4. **Ensure historical data is fresh**: Run `uv run backtest.py --update-data` to download/update BTC/EUR 1-minute candle data from Kraken's public API. This caches to `data/btceur_1m.csv`. Run this at the start of every session to ensure the backtest window includes the latest market data.
-5. **Initialize results.tsv**: Create `results.tsv` with just the header row. The baseline will be recorded after the first run.
+5. **Initialize results.tsv safely**: `results.tsv` is a persistent local experiment ledger across runs. If it does not exist, create it with the header row below. If it already exists, preserve its contents and keep appending new rows. Never clear it automatically at the start of a run.
 6. **Confirm and go**: Confirm setup looks good.
 
 Once you get confirmation, kick off the experimentation.
@@ -77,35 +77,36 @@ grep "^sharpe_ratio:" run.log
 
 ## Logging results
 
-When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions).
+When an experiment is done, log it to `results.tsv` (tab-separated, NOT comma-separated — commas break in descriptions). This file is a persistent local history across runs, so always append and include the active `run_tag`.
 
-The TSV has a header row and 7 columns:
+The TSV has a header row and 8 columns:
 
 ```
-commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
+run_tag	commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
 ```
 
-1. git commit hash (short, 7 chars)
-2. sharpe_ratio (train) achieved (e.g. 1.85) — use 0.00 for crashes
-3. sharpe_test achieved (e.g. 1.42) — use 0.00 for crashes
-4. total P&L in EUR (e.g. 47.30) — use 0.00 for crashes
-5. num_trades executed
-6. status: `keep`, `discard`, or `crash`
-7. short text description of what this experiment tried
+1. `run_tag` for the current session/branch (date-based, e.g. `2026-04-06`)
+2. git commit hash (short, 7 chars)
+3. sharpe_ratio (train) achieved (e.g. 1.85) — use 0.00 for crashes
+4. sharpe_test achieved (e.g. 1.42) — use 0.00 for crashes
+5. total P&L in EUR (e.g. 47.30) — use 0.00 for crashes
+6. num_trades executed
+7. status: `keep`, `discard`, or `crash`
+8. short text description of what this experiment tried
 
 Example:
 
 ```
-commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
-a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
-b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
-c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit — train/test diverge)
-d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
+run_tag	commit	sharpe_ratio	sharpe_test	pnl_eur	num_trades	status	description
+2026-04-06	a1b2c3d	0.00	0.00	0.00	0	keep	baseline (momentum crossover)
+2026-04-06	b2c3d4e	1.85	1.42	47.30	312	keep	add RSI filter with 60-min window
+2026-04-06	c3d4e5f	2.10	0.30	52.10	890	discard	aggressive scalping (overfit — train/test diverge)
+2026-04-06	d4e5f6g	0.00	0.00	0.00	0	crash	division by zero in volatility calc
 ```
 
 ## The experiment loop
 
-The experiment runs on a dedicated branch (e.g. `autotrader/mar30`).
+The experiment runs on a dedicated branch (e.g. `autotrader/2026-04-06`).
 
 LOOP FOREVER:
 
@@ -115,12 +116,12 @@ LOOP FOREVER:
 4. Run the experiment: `uv run backtest.py > run.log 2>&1` (redirect everything — do NOT use tee or let output flood your context)
 5. Read out the results: `grep "^sharpe_ratio:\|^sharpe_test:\|^num_trades:" run.log`
 6. If the grep output is empty, the run crashed. Run `tail -n 50 run.log` to read the Python stack trace and attempt a fix. If you can't get things to work after more than a few attempts, give up.
-7. Record the results in the tsv (NOTE: do not commit the results.tsv file, leave it untracked by git)
+7. Record the results in the tsv with the active `run_tag` (NOTE: do not commit the results.tsv file, leave it untracked by git)
 8. **Keep/discard decision** (apply in order):
    a. If the strategy crashed → log as `crash`, revert.
    b. If num_trades < 40 (fewer than 20 round-trips) → log as `discard`. The strategy is too passive. Keep iterating.
    c. If sharpe_ratio (train) is good but sharpe_test is much lower (e.g. train > 2.0 but test < 0.5) → log as `discard` (overfitting).
-   d. If sharpe_ratio improved over the current best → `keep`, advance the branch.
+   d. If sharpe_ratio improved over the current best within the active `run_tag` → `keep`, advance the branch.
    e. Otherwise → `discard`, git reset back to where you started.
 9. A Sharpe of 0.00 with 0 trades is **never** a valid "keep". That means you haven't found a strategy — keep searching. The starting portfolio already has BTC exposure, so even doing nothing produces a non-zero (likely negative in a downtrend) Sharpe. You must beat that.
 
@@ -131,6 +132,8 @@ The idea is that you are a completely autonomous trading researcher trying thing
 **Crashes**: If a run crashes (a bug in strategy.py), use your judgment: fix obvious bugs and re-run. If the idea itself is broken, log "crash", revert, and move on.
 
 **Data freshness**: At the start of each session, run `uv run backtest.py --update-data` to ensure the cache includes the latest market data up to now. The backtest window should always end at the present.
+
+**Run-to-run comparability**: Because each session refreshes data and the 90-day backtest window slides forward, results from different `run_tag`s are useful history but are not perfectly comparable. Use `run_tag` to compare experiments within the same run first; use cross-run history mainly for auditability and idea tracking.
 
 **Live validation (optional)**: Periodically, you can validate the current best strategy against live market data using `uv run exchange.py --duration 120 > live.log 2>&1`. This runs a 2-minute live shadow cycle against real-time Kraken prices. It's a sanity check, not the primary metric — live results will differ from backtest due to different market conditions.
 

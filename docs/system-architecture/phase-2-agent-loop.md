@@ -78,7 +78,7 @@ flowchart LR
 
 - `strategy.py` changes every experiment.
 - `run.log` captures the last backtest output.
-- `results.tsv` tracks outcomes across experiments.
+- `results.tsv` is a persistent local ledger across runs; each row includes a date-based `run_tag` so histories remain interpretable as the backtest window moves.
 - `backtest.py`, `exchange.py`, and `program.md` act as the stable operating environment.
 
 ## Promotion Rule

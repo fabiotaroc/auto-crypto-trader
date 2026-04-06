@@ -64,7 +64,7 @@ BRAINSTORM.md    — full design document and rationale
 docs/            — architecture docs and phase walkthroughs
 pyproject.toml   — dependencies
 data/            — cached historical OHLC candles (untracked)
-results.tsv      — experiment log (untracked)
+results.tsv      — persistent experiment log with `run_tag` history (untracked)
 ```
 
 ## Documentation
