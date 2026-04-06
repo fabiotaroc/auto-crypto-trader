@@ -37,7 +37,6 @@ class Strategy:
         self.entry_minute = None
         self.highest_price = None
         self.last_exit_minute = -10_000
-        self.seed_position = False
 
     def on_tick(self, tick):
         prices = tick["history"]
@@ -50,11 +49,10 @@ class Strategy:
 
         if position > 0 and self.entry_price is None:
             # The harness starts with BTC inventory. Seed it as an existing
-            # position and manage it with a slower risk-off unwind.
+            # position, but allow an immediate regime-based exit.
             self.entry_price = price
-            self.entry_minute = minute
+            self.entry_minute = minute - self.min_hold_minutes
             self.highest_price = price
-            self.seed_position = True
 
         if position > 0 and self.entry_price is not None:
             return self._manage_position(tick, prices, minute)
@@ -121,19 +119,12 @@ class Strategy:
             if price <= trail_floor:
                 return Signal("sell", tick["position"])
 
-        if self.seed_position and hold_minutes < 720:
-            prices_arr = np.asarray(prices, dtype=float)
-            medium = float(np.mean(prices_arr[-self.medium_window:]))
-            slow = float(np.mean(prices_arr[-self.slow_window:]))
-            medium_momentum = price / prices_arr[-360] - 1.0
-            day_momentum = price / prices_arr[-1440] - 1.0
-            if price < slow * 0.998 and day_momentum < -0.012:
-                return Signal("sell", tick["position"])
-            if medium < slow and medium_momentum < -0.006:
-                return Signal("sell", tick["position"])
-            return None
-
         if hold_minutes < self.min_hold_minutes:
+            prices_arr = np.asarray(prices, dtype=float)
+            slow = float(np.mean(prices_arr[-self.slow_window:]))
+            day_momentum = price / prices_arr[-1440] - 1.0
+            if price < slow and day_momentum < -0.01:
+                return Signal("sell", tick["position"])
             return None
 
         prices_arr = np.asarray(prices, dtype=float)
@@ -189,11 +180,9 @@ class Strategy:
             self.entry_price = fill["price"]
             self.entry_minute = int(fill["timestamp"] // 60)
             self.highest_price = fill["price"]
-            self.seed_position = False
             return
 
         self.last_exit_minute = int(fill["timestamp"] // 60)
         self.entry_price = None
         self.entry_minute = None
         self.highest_price = None
-        self.seed_position = False
